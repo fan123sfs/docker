@@ -1,0 +1,110 @@
+name: pull-general-docker
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # 逗号分隔的 name，不要加空格；只执行写在这里的 run
+    env:
+      ONLY: redis,mysql,nginx,openresty,open21jre,open21jdk,newapi,xui,opencode,questdb,headscale,golang,registry
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: login
+        if: env.ONLY != ''
+        run: |
+          echo "${{ secrets.ALIYUN_PASSWORD }}" | docker login --username="${{ secrets.ALIYUN_USERNAME }}" --password-stdin registry.cn-hangzhou.aliyuncs.com
+
+      - name: redis
+        if: contains(format(',{0},', env.ONLY), ',redis,')
+        run: |
+          docker pull redis:latest
+          docker tag redis:latest registry.cn-hangzhou.aliyuncs.com/syncimage/redis:8.10.2
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/redis:8.10.2
+
+      - name: mysql
+        if: contains(format(',{0},', env.ONLY), ',mysql,')
+        run: |
+          docker pull mysql:lts
+          docker tag mysql:lts registry.cn-hangzhou.aliyuncs.com/syncimage/mysql:9.7.2
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/mysql:9.7.2
+
+      - name: nginx
+        if: contains(format(',{0},', env.ONLY), ',nginx,')
+        run: |
+          docker pull nginx:mainline-perl
+          docker tag nginx:mainline-perl registry.cn-hangzhou.aliyuncs.com/syncimage/nginx:1.31.6
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/nginx:1.31.6
+
+      # 需要额外 Lua 库时用 bookworm-fat（内置 opm + luarocks） https://hub.docker.com/r/openresty/openresty/tags
+      - name: openresty
+        if: contains(format(',{0},', env.ONLY), ',openresty,')
+        run: |
+          docker pull openresty/openresty:bookworm-fat
+          docker tag openresty/openresty:bookworm-fat registry.cn-hangzhou.aliyuncs.com/syncimage/openresty:1.31.1
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/openresty:1.31.1
+
+      - name: open21jre
+        if: contains(format(',{0},', env.ONLY), ',open21jre,')
+        run: |
+          docker pull ibm-semeru-runtimes:open-21-jre
+          docker tag ibm-semeru-runtimes:open-21-jre registry.cn-hangzhou.aliyuncs.com/syncimage/open-21-jre:12.10
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/open-21-jre:12.10
+
+      - name: open21jdk
+        if: contains(format(',{0},', env.ONLY), ',open21jdk,')
+        run: |
+          docker pull ibm-semeru-runtimes:open-21-jdk
+          docker tag ibm-semeru-runtimes:open-21-jdk registry.cn-hangzhou.aliyuncs.com/syncimage/open-21-jdk:12.10
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/open-21-jdk:12.10
+
+      - name: newapi
+        if: contains(format(',{0},', env.ONLY), ',newapi,')
+        run: |
+          docker pull calciumion/new-api:latest
+          docker tag calciumion/new-api:latest registry.cn-hangzhou.aliyuncs.com/syncimage/new-api:1.0.0.40
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/new-api:1.0.0.40
+
+      - name: xui
+        if: contains(format(',{0},', env.ONLY), ',xui,')
+        run: |
+          docker pull alireza7/x-ui:latest
+          docker tag alireza7/x-ui:latest registry.cn-hangzhou.aliyuncs.com/syncimage/x-ui:1.12.0
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/x-ui:1.12.0
+
+      # https://github.com/anomalyco/opencode/releases
+      - name: opencode
+        if: contains(format(',{0},', env.ONLY), ',opencode,')
+        run: |
+          docker pull ghcr.io/anomalyco/opencode:latest
+          docker tag ghcr.io/anomalyco/opencode:latest registry.cn-hangzhou.aliyuncs.com/syncimage/opencode:1.18.31
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/opencode:1.18.31
+
+      - name: questdb
+        if: contains(format(',{0},', env.ONLY), ',questdb,')
+        run: |
+          docker pull questdb/questdb:latest
+          docker tag questdb/questdb:latest registry.cn-hangzhou.aliyuncs.com/syncimage/questdb:10.0.1
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/questdb:10.0.1
+
+      - name: headscale
+        if: contains(format(',{0},', env.ONLY), ',headscale,')
+        run: |
+          docker pull headscale/headscale:latest
+          docker tag headscale/headscale:latest registry.cn-hangzhou.aliyuncs.com/syncimage/headscale:0.29.4
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/headscale:0.29.4
+
+      - name: golang
+        if: contains(format(',{0},', env.ONLY), ',golang,')
+        run: |
+          docker pull golang:alpine
+          docker tag golang:alpine registry.cn-hangzhou.aliyuncs.com/syncimage/golang:1.27.1
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/golang:1.27.1
+
+      - name: registry
+        if: contains(format(',{0},', env.ONLY), ',registry,')
+        run: |
+          docker pull registry:latest
+          docker tag registry:latest registry.cn-hangzhou.aliyuncs.com/syncimage/registry:3.1.2
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/registry:3.1.2

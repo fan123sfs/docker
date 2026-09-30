@@ -1,0 +1,102 @@
+name: pull-dify-docker
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # 逗号分隔的 name，不要加空格；只执行写在这里的 run
+    env:
+      ONLY: busybox,dify-api,dify-web,postgres,redis,sandbox,local-sandbox,plugin-daemon,agent-backend,squid,weaviate,nginx
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: login
+        if: env.ONLY != ''
+        run: |
+          echo "${{ secrets.ALIYUN_PASSWORD }}" | docker login --username="${{ secrets.ALIYUN_USERNAME }}" --password-stdin registry.cn-hangzhou.aliyuncs.com
+
+      - name: busybox
+        if: contains(format(',{0},', env.ONLY), ',busybox,')
+        run: |
+          docker pull busybox:latest
+          docker tag busybox:latest registry.cn-hangzhou.aliyuncs.com/syncimage/dify-busybox:latest
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-busybox:latest
+
+      - name: dify-api
+        if: contains(format(',{0},', env.ONLY), ',dify-api,')
+        run: |
+          docker pull langgenius/dify-api:1.17.1
+          docker tag langgenius/dify-api:1.17.1 registry.cn-hangzhou.aliyuncs.com/syncimage/dify-api:1.17.1
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-api:1.17.1
+
+      - name: dify-web
+        if: contains(format(',{0},', env.ONLY), ',dify-web,')
+        run: |
+          docker pull langgenius/dify-web:1.17.1
+          docker tag langgenius/dify-web:1.17.1 registry.cn-hangzhou.aliyuncs.com/syncimage/dify-web:1.17.1
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-web:1.17.1
+
+      - name: postgres
+        if: contains(format(',{0},', env.ONLY), ',postgres,')
+        run: |
+          docker pull postgres:15-alpine
+          docker tag postgres:15-alpine registry.cn-hangzhou.aliyuncs.com/syncimage/dify-postgres:15-alpine
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-postgres:15-alpine
+
+      - name: redis
+        if: contains(format(',{0},', env.ONLY), ',redis,')
+        run: |
+          docker pull redis:6-alpine
+          docker tag redis:6-alpine registry.cn-hangzhou.aliyuncs.com/syncimage/dify-redis:6-alpine
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-redis:6-alpine
+
+      - name: sandbox
+        if: contains(format(',{0},', env.ONLY), ',sandbox,')
+        run: |
+          docker pull langgenius/dify-sandbox:0.2.15
+          docker tag langgenius/dify-sandbox:0.2.15 registry.cn-hangzhou.aliyuncs.com/syncimage/dify-sandbox:0.2.15
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-sandbox:0.2.15
+
+      - name: local-sandbox
+        if: contains(format(',{0},', env.ONLY), ',local-sandbox,')
+        run: |
+          docker pull langgenius/dify-agent-local-sandbox:1.17.1
+          docker tag langgenius/dify-agent-local-sandbox:1.17.1 registry.cn-hangzhou.aliyuncs.com/syncimage/dify-agent-local-sandbox:1.17.1
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-agent-local-sandbox:1.17.1
+
+      - name: plugin-daemon
+        if: contains(format(',{0},', env.ONLY), ',plugin-daemon,')
+        run: |
+          docker pull langgenius/dify-plugin-daemon:0.6.10-local
+          docker tag langgenius/dify-plugin-daemon:0.6.10-local registry.cn-hangzhou.aliyuncs.com/syncimage/dify-plugin-daemon:0.6.10-local
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-plugin-daemon:0.6.10-local
+
+      - name: agent-backend
+        if: contains(format(',{0},', env.ONLY), ',agent-backend,')
+        run: |
+          docker pull langgenius/dify-agent-backend:1.17.1
+          docker tag langgenius/dify-agent-backend:1.17.1 registry.cn-hangzhou.aliyuncs.com/syncimage/dify-agent-backend:1.17.1
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-agent-backend:1.17.1
+
+      - name: squid
+        if: contains(format(',{0},', env.ONLY), ',squid,')
+        run: |
+          docker pull ubuntu/squid:latest
+          docker tag ubuntu/squid:latest registry.cn-hangzhou.aliyuncs.com/syncimage/dify-squid:latest
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-squid:latest
+
+      # compose 写的是 cr.weaviate.io/...，Hub 上同 tag 为 semitechnologies/weaviate
+      - name: weaviate
+        if: contains(format(',{0},', env.ONLY), ',weaviate,')
+        run: |
+          docker pull semitechnologies/weaviate:1.39.2
+          docker tag semitechnologies/weaviate:1.39.2 registry.cn-hangzhou.aliyuncs.com/syncimage/dify-weaviate:1.39.2
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-weaviate:1.39.2
+
+      - name: nginx
+        if: contains(format(',{0},', env.ONLY), ',nginx,')
+        run: |
+          docker pull nginx:latest
+          docker tag nginx:latest registry.cn-hangzhou.aliyuncs.com/syncimage/dify-nginx:latest
+          docker push registry.cn-hangzhou.aliyuncs.com/syncimage/dify-nginx:latest
