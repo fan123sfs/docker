@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     # 逗号分隔的 name，不要加空格；只执行写在这里的 run
     env:
-      ONLY: redis,mysql,nginx,openresty,open21jre,open21jdk,newapi,xui,opencode,questdb,headscale,golang,registry
+      ONLY: nginx
     steps:
       - uses: actions/checkout@v6
 
