@@ -1,0 +1,342 @@
+# FreeRDP 安卓手机 64 位。编译步骤对齐 freerdp-ci/.github/workflows/android.yml。
+# apk 放进镜像的 /payload，拉取后 docker run -v 当前目录:/out 即得到 freerdp.apk。
+name: build-freerdp-android
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        required: false
+        type: string
+        default: "3.32.1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-freerdp-android-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: ref
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          case "$INPUT_REF" in
+            ""|*[!A-Za-z0-9_.-]*)
+              echo "::error::ref 为空或含镜像 tag 不支持的字符: $INPUT_REF"
+              exit 1
+              ;;
+          esac
+          repo="https://github.com/FreeRDP/FreeRDP.git"
+          if git ls-remote "$repo" "refs/heads/$INPUT_REF" | grep -q . \
+             && ! git ls-remote --refs "$repo" "refs/tags/$INPUT_REF" | grep -q .; then
+            echo "::error::不能检出分支，请填写已发布的 Git 标签: $INPUT_REF"
+            exit 1
+          fi
+          upstream=""
+          if git ls-remote --refs "$repo" "refs/tags/$INPUT_REF" | grep -q .; then
+            upstream="$INPUT_REF"
+          elif [[ "$INPUT_REF" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            remote="$(git ls-remote --tags "$repo" "refs/tags/${version}*")"
+            mapfile -t tags < <(
+              printf '%s\n' "$remote" \
+                | awk 'NF { print $2 }' \
+                | sed -E 's#^refs/tags/##; s#\^\{\}$##' \
+                | { grep -E "^${version}([-+].*)?$" || true; } \
+                | sort -u
+            )
+            if [ "${#tags[@]}" -ne 1 ]; then
+              echo "::error::版本 ${version} 对应 ${#tags[@]} 个标签: ${tags[*]:-无}，请填写完整 tag"
+              exit 1
+            fi
+            upstream="${tags[0]}"
+          elif [[ "$INPUT_REF" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+)[-+].+$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            if git ls-remote --refs "$repo" "refs/tags/$INPUT_REF" | grep -q .; then
+              upstream="$INPUT_REF"
+            else
+              echo "::error::找不到已发布标签: $INPUT_REF"
+              exit 1
+            fi
+          else
+            echo "::error::ref 必须对应已发布的 Git 标签: $INPUT_REF"
+            exit 1
+          fi
+          version="$upstream"
+          if [[ "$version" =~ ^((v)?[0-9]+\.[0-9]+\.[0-9]+)([-+].+)?$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          fi
+          echo "UPSTREAM_REF=$upstream" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "检出 ${upstream}，发布版本 ${version}"
+
+      - name: free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost \
+                      /usr/local/lib/android/sdk/system-images \
+                      /usr/local/lib/android/sdk/emulator || true
+          df -h / | tail -1
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@v6
+        with:
+          repository: FreeRDP/FreeRDP
+          ref: ${{ env.UPSTREAM_REF }}
+          path: src
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: customize
+        run: bash freerdp-android-builder/scripts/apply-customization.sh src
+
+      - name: customize verify
+        run: |
+          set -euo pipefail
+          test -f src/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/custom/RemoteDesktopConfigDialog.java
+          grep -q 'RemoteDesktopConfigDialog' src/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/presentation/HomeActivity.java
+          grep -q 'jsonBookmarks' src/client/Android/Studio/freeRDPCore/src/main/res/menu/home_menu.xml
+          grep -q 'android' src/client/Android/Studio/aFreeRDP/src/main/AndroidManifest.xml
+          echo "定制资源与补丁已合入"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          # v3 默认还会装已从 SDK 仓库移除的 tools，sdkmanager 会直接失败
+          packages: platform-tools
+
+      - name: sdk
+        run: |
+          file=src/client/Android/Studio/build.gradle
+          int_prop() {
+            awk -v key="$1" '
+              index($0, key "\047") {
+                line = $0
+                sub(".*" key "\047, *", "", line)
+                sub("[^0-9].*", "", line)
+                print line
+                exit
+              }
+            ' "$file"
+          }
+          str_prop() {
+            awk -v key="$1" '
+              index($0, key "\047") {
+                line = $0
+                sub(".*" key "\047, \047", "", line)
+                sub("\047.*", "", line)
+                print line
+                exit
+              }
+            ' "$file"
+          }
+          COMPILE_API=$(int_prop COMPILE_API)
+          TARGET_API=$(int_prop TARGET_API)
+          MIN_API=$(int_prop MIN_API)
+          TOOLS_VERSION=$(str_prop TOOLS_VERSION)
+          NDK_VERSION=$(str_prop NDK_VERSION)
+          CMAKE_VERSION=$(str_prop CMAKE_VERSION)
+          test -n "$COMPILE_API"
+          test -n "$TARGET_API"
+          test -n "$MIN_API"
+          test -n "$TOOLS_VERSION"
+          test -n "$NDK_VERSION"
+          test -n "$CMAKE_VERSION"
+          {
+            echo "COMPILE_API=$COMPILE_API"
+            echo "TARGET_API=$TARGET_API"
+            echo "MIN_API=$MIN_API"
+            echo "TOOLS_VERSION=$TOOLS_VERSION"
+            echo "NDK_VERSION=$NDK_VERSION"
+            echo "CMAKE_VERSION=$CMAKE_VERSION"
+          } >> "$GITHUB_ENV"
+          echo "sdk compile=$COMPILE_API target=$TARGET_API min=$MIN_API tools=$TOOLS_VERSION ndk=$NDK_VERSION cmake=$CMAKE_VERSION abi=arm64-v8a"
+          # yes 在 sdkmanager 提前退出时会报 Broken pipe，与安装失败无关。
+          yes 2>/dev/null | sdkmanager --licenses > /dev/null || true
+          # API 37 起仓库包名带次版本，例如 platforms;android-37.0，没有 platforms;android-37。
+          # compileSdkVersion 仍按 platforms/android-37 查找，装完后补同名链接。
+          list="$(sdkmanager --list 2>/dev/null || true)"
+          has_pkg() {
+            awk -F'|' -v pkg="$1" '{ gsub(/^[ \t]+|[ \t]+$/, "", $1); if ($1 == pkg) found=1 } END { exit !found }' <<<"$list"
+          }
+          platform_pkg="platforms;android-${COMPILE_API}"
+          if ! has_pkg "$platform_pkg"; then
+            alt="platforms;android-${COMPILE_API}.0"
+            if has_pkg "$alt"; then
+              echo "仓库没有 ${platform_pkg}，改用 ${alt}"
+              platform_pkg="$alt"
+            else
+              echo "::error::sdkmanager 找不到 ${platform_pkg} 或 ${alt}"
+              exit 1
+            fi
+          fi
+          echo "安装 ${platform_pkg}"
+          sdkmanager --install \
+            "$platform_pkg" \
+            "build-tools;${TOOLS_VERSION}" \
+            "ndk;${NDK_VERSION}" \
+            "cmake;${CMAKE_VERSION}"
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          link="${sdk_root}/platforms/android-${COMPILE_API}"
+          dotted="${sdk_root}/platforms/android-${COMPILE_API}.0"
+          if [[ ! -e "$link" && -d "$dotted" ]]; then
+            ln -s "android-${COMPILE_API}.0" "$link"
+            echo "已链接 platforms/android-${COMPILE_API} -> android-${COMPILE_API}.0"
+          fi
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            src/client/Android/Studio/freeRDPCore/src/main/jniLibs
+            src/client/Android/Studio/freeRDPCore/.cxx
+          key: freerdp-android-${{ inputs.ref }}-arm64-v8a-${{ hashFiles('freerdp-android-builder/**', 'src/client/Android/cmake/**', 'src/client/Android/Studio/**/*.gradle') }}
+          restore-keys: |
+            freerdp-android-${{ inputs.ref }}-arm64-v8a-
+
+      # 原生依赖源码在 external/，戳记在 .cxx；Actions 只缓存 jniLibs/.cxx 时 restore 后
+      # 可能出现「戳记认为已下载、external 却是空目录」——openh264 缺 .git、ffmpeg 缺 configure 等。
+      - name: native external sanity
+        run: |
+          set -euo pipefail
+          base=src/client/Android/Studio/freeRDPCore/src/main/cpp/external
+          cxx=src/client/Android/Studio/freeRDPCore/.cxx
+
+          clean_prefix() {
+            local name="$1"
+            [ -d "$cxx" ] || return 0
+            while IFS= read -r -d '' d; do
+              rm -rf "$d"
+            done < <(find "$cxx" -type d -name "${name}-prefix" -print0 2>/dev/null || true)
+          }
+
+          ext="$base/openh264"
+          if [ -d "$ext/.git" ]; then
+            echo "openh264 已是 git 仓库"
+          else
+            echo "openh264 缺少 .git，清理以便重新 clone"
+            rm -rf "$ext"
+            clean_prefix openh264
+          fi
+
+          for spec in ffmpeg:configure opus:CMakeLists.txt; do
+            name="${spec%%:*}"
+            marker="${spec#*:}"
+            ext="$base/$name"
+            if [ -e "$ext/$marker" ]; then
+              echo "${name} 已有 ${marker}"
+            else
+              echo "${name} 缺少 ${marker}，清理以便重新下载"
+              rm -rf "$ext"
+              clean_prefix "$name"
+            fi
+          done
+
+      - name: keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore src/client/Android/Studio/debug.keystore \
+            -storetype JKS -storepass android -keypass android \
+            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: release.properties
+        working-directory: src/client/Android/Studio
+        run: |
+          cat > release.properties <<EOF
+          RELEASE_STORE_FILE=../debug.keystore
+          RELEASE_KEY_ALIAS=androiddebugkey
+          RELEASE_KEY_PASSWORD=android
+          RELEASE_STORE_PASSWORD=android
+          COMPILE_API=${COMPILE_API}
+          TARGET_API=${TARGET_API}
+          MIN_API=${MIN_API}
+          TOOLS_VERSION=${TOOLS_VERSION}
+          NDK_VERSION=${NDK_VERSION}
+          CMAKE_VERSION=${CMAKE_VERSION}
+          SPLIT_ENABLED=true
+          SPLIT_ARCHITECTURES=arm64-v8a
+          ABI_FILTERS=arm64-v8a
+          BUILD_UNIVERSAL=false
+          VERSION_NAME=${RELEASE_VERSION}
+          EOF
+          cat release.properties
+
+      - name: apk
+        working-directory: src/client/Android/Studio
+        run: |
+          exact_tag="$(git -C ../../.. describe --tags --exact-match)"
+          test "$exact_tag" = "$UPSTREAM_REF"
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace \
+            -Dorg.gradle.jvmargs=-Xmx6g \
+            :aFreeRDP:assembleRelease
+
+      - name: pack
+        run: |
+          mapfile -t apks < <(find src/client/Android/Studio/aFreeRDP/build/outputs/apk -name '*.apk' -type f | sort)
+          printf '%s\n' "${apks[@]}"
+          test "${#apks[@]}" -eq 1
+          mkdir -p pkg/payload
+          cp "${apks[0]}" pkg/payload/freerdp.apk
+          ls -lh pkg/payload
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: login
+        run: |
+          echo "${{ secrets.ALIYUN_PASSWORD }}" | docker login --username="${{ secrets.ALIYUN_USERNAME }}" --password-stdin registry.cn-hangzhou.aliyuncs.com
+
+      - name: push
+        env:
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+        run: |
+          cat > pkg/Dockerfile <<'EOF'
+          FROM alpine:3.22
+          COPY payload/ /payload/
+          ENTRYPOINT ["cp", "-a", "/payload/.", "/out/"]
+          EOF
+          buildx_push_retry() {
+            local image="$1"
+            shift
+            local i
+            for i in 1 2 3 4 5; do
+              if docker buildx build \
+                --tag "$image" \
+                --provenance=false \
+                --sbom=false \
+                --output "type=registry,compression=gzip,force-compression=true,oci-mediatypes=true,compression-level=3" \
+                "$@"; then
+                return 0
+              fi
+              echo "::warning::docker push attempt ${i}/5 failed for ${image}"
+              sleep $((i * 20))
+            done
+            echo "::error::docker push failed for ${image}; printing layer sizes"
+            docker buildx build --tag "$image" --load --provenance=false --sbom=false "$@" || true
+            docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}' "$image" || true
+            docker history --human --no-trunc --format 'table {{.Size}}\t{{.CreatedBy}}' "$image" || true
+            docker buildx imagetools inspect "$image" || true
+            return 1
+          }
+          image="registry.cn-hangzhou.aliyuncs.com/syncimage/freerdp-android:${RELEASE_VERSION}"
+          buildx_push_retry "$image" pkg
+          echo "已推送 ${image}"
+          echo "下载: docker run --rm -v \"\${PWD}:/out\" ${image}"
