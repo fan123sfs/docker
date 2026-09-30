@@ -1,0 +1,125 @@
+name: build-akshare-docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      akshare_version:
+        required: false
+        type: string
+        default: "1.18.95"
+      aktools_version:
+        required: false
+        type: string
+        default: "0.0.91"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # 新加坡 acr-relay 对外端口；relay 会转发到 registry.cn-hangzhou.aliyuncs.com/syncimage/...
+      RELAY_REGISTRY: 43.163.118.9:31005
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: ref
+        env:
+          AKSHARE_VERSION: ${{ inputs.akshare_version }}
+          AKTOOLS_VERSION: ${{ inputs.aktools_version }}
+        run: |
+          set -euo pipefail
+          for v in "$AKSHARE_VERSION" "$AKTOOLS_VERSION"; do
+            case "$v" in
+              ""|*[!0-9.]*)
+                echo "::error::版本号无效: $v"
+                exit 1
+                ;;
+            esac
+          done
+          for spec in "akshare:$AKSHARE_VERSION" "aktools:$AKTOOLS_VERSION"; do
+            name="${spec%%:*}"
+            ver="${spec#*:}"
+            if ! curl -sf "https://pypi.org/pypi/${name}/${ver}/json" -o /dev/null; then
+              echo "::error::PyPI 未发布 ${name}==${ver}，请填写已发布版本"
+              exit 1
+            fi
+          done
+          echo "AKSHARE_VERSION=$AKSHARE_VERSION" >> "$GITHUB_ENV"
+          echo "AKTOOLS_VERSION=$AKTOOLS_VERSION" >> "$GITHUB_ENV"
+          echo "发布版本 akshare=${AKSHARE_VERSION} aktools=${AKTOOLS_VERSION}"
+
+      - name: allow HTTP relay registry
+        run: |
+          set -euo pipefail
+          relay="$RELAY_REGISTRY"
+          if [ -f /etc/docker/daemon.json ] && command -v jq >/dev/null 2>&1; then
+            sudo jq --arg r "$relay" \
+              '.["insecure-registries"] = ((.["insecure-registries"] // []) + [$r] | unique)' \
+              /etc/docker/daemon.json | sudo tee /etc/docker/daemon.json.new >/dev/null
+            sudo mv /etc/docker/daemon.json.new /etc/docker/daemon.json
+          else
+            printf '%s\n' "{\"insecure-registries\":[\"${relay}\"]}" | sudo tee /etc/docker/daemon.json >/dev/null
+          fi
+          sudo systemctl restart docker
+          sleep 3
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."43.163.118.9:31005"]
+              http = true
+              insecure = true
+
+      - name: login relay
+        env:
+          RELAY_REGISTRY_USER: ${{ secrets.RELAY_REGISTRY_USER }}
+        run: |
+          set -euo pipefail
+          user="${RELAY_REGISTRY_USER:-github}"
+          echo "${{ secrets.RELAY_REGISTRY_PASSWORD }}" | docker login --username="$user" --password-stdin "$RELAY_REGISTRY"
+
+      - name: akshare
+        env:
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+        run: |
+          docker pull python:3.11-slim
+          cat > Dockerfile <<EOF
+          FROM python:3.11-slim
+          RUN pip install --no-cache-dir \
+                  aktools==${AKTOOLS_VERSION} \
+                  akshare==${AKSHARE_VERSION} \
+                  -i https://pypi.org/simple \
+                  --upgrade
+          EXPOSE 8080
+          CMD ["python", "-m", "aktools", "--host", "0.0.0.0", "--port", "8080"]
+          EOF
+          buildx_push_retry() {
+            local image="$1"
+            shift
+            local i
+            for i in 1 2 3 4 5; do
+              if docker buildx build \
+                --tag "$image" \
+                --provenance=false \
+                --sbom=false \
+                --output "type=registry,compression=gzip,force-compression=true,oci-mediatypes=true,compression-level=3" \
+                "$@"; then
+                return 0
+              fi
+              echo "::warning::docker push attempt ${i}/5 failed for ${image}"
+              sleep $((i * 20))
+            done
+            echo "::error::docker push failed for ${image}; printing layer sizes"
+            docker buildx build --tag "$image" --load --provenance=false --sbom=false "$@" || true
+            docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}' "$image" || true
+            docker history --human --no-trunc --format 'table {{.Size}}\t{{.CreatedBy}}' "$image" || true
+            docker buildx imagetools inspect "$image" || true
+            return 1
+          }
+          image="${RELAY_REGISTRY}/syncimage/akshare:${AKSHARE_VERSION}"
+          echo "推送到中转 ${image}（relay 将同步至 registry.cn-hangzhou.aliyuncs.com/syncimage/akshare:${AKSHARE_VERSION}）"
+          buildx_push_retry "$image" .

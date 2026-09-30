@@ -1,0 +1,77 @@
+name: build-registry-relay-docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        required: false
+        type: string
+        default: "0.1.2"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: ref
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          case "$INPUT_VERSION" in
+            ""|*[!0-9.]*)
+              echo "::error::版本号无效: $INPUT_VERSION"
+              exit 1
+              ;;
+          esac
+          for f in registry-relay/relay/Dockerfile registry-relay/relay/relay.sh; do
+            if [ ! -f "$f" ]; then
+              echo "::error::缺少文件: $f"
+              ls -la "$(dirname "$f")" || true
+              exit 1
+            fi
+          done
+          echo "VERSION=$INPUT_VERSION" >> "$GITHUB_ENV"
+          echo "发布版本 acr-relay=${INPUT_VERSION}"
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: login
+        run: |
+          echo "${{ secrets.ALIYUN_PASSWORD }}" | docker login --username="${{ secrets.ALIYUN_USERNAME }}" --password-stdin registry.cn-hangzhou.aliyuncs.com
+
+      - name: acr-relay
+        env:
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+        run: |
+          buildx_push_retry() {
+            local image="$1"
+            shift
+            local i
+            for i in 1 2 3 4 5; do
+              if docker buildx build \
+                --tag "$image" \
+                --provenance=false \
+                --sbom=false \
+                --output "type=registry,compression=gzip,force-compression=true,oci-mediatypes=true,compression-level=3" \
+                "$@"; then
+                return 0
+              fi
+              echo "::warning::docker push attempt ${i}/5 failed for ${image}"
+              sleep $((i * 20))
+            done
+            echo "::error::docker push failed for ${image}; printing layer sizes"
+            docker buildx build --tag "$image" --load --provenance=false --sbom=false "$@" || true
+            docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}' "$image" || true
+            docker history --human --no-trunc --format 'table {{.Size}}\t{{.CreatedBy}}' "$image" || true
+            docker buildx imagetools inspect "$image" || true
+            return 1
+          }
+          buildx_push_retry "registry.cn-hangzhou.aliyuncs.com/syncimage/acr-relay:${VERSION}" ./registry-relay/relay

@@ -1,0 +1,406 @@
+name: build-harness-docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        required: false
+        type: string
+        default: "dsh-v0.2.0-rc.2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-harness-docker-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # 新加坡 acr-relay 对外端口；relay 会转发到 registry.cn-hangzhou.aliyuncs.com/syncimage/...
+      RELAY_REGISTRY: 43.163.118.9:31005
+    steps:
+      - name: ref
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          case "$INPUT_REF" in
+            ""|*[!A-Za-z0-9_.-]*)
+              echo "::error::ref 为空或含不支持的字符: $INPUT_REF"
+              exit 1
+              ;;
+          esac
+          repo="https://github.com/deepseek-ai/deepseek-harness.git"
+          if git ls-remote "$repo" "refs/heads/$INPUT_REF" | grep -q . \
+             && ! git ls-remote --refs "$repo" "refs/tags/$INPUT_REF" | grep -q .; then
+            echo "::error::不能检出分支，请填写已发布的 Git 标签: $INPUT_REF"
+            exit 1
+          fi
+          resolve_tag() {
+            git ls-remote --refs "$repo" "refs/tags/$1" | awk 'NF { sub(/^.*refs\/tags\//, ""); print; exit }'
+          }
+          upstream=""
+          for candidate in "$INPUT_REF" "dsh-$INPUT_REF" "dsh-v${INPUT_REF#dsh-v}" "dsh-v${INPUT_REF#dsh-}" "dsh-v${INPUT_REF#v}"; do
+            if upstream="$(resolve_tag "$candidate")" && [ -n "$upstream" ]; then
+              break
+            fi
+            upstream=""
+          done
+          if [ -z "$upstream" ]; then
+            base="${INPUT_REF#dsh-}"
+            base="${base#v}"
+            if upstream="$(resolve_tag "dsh-v${base}")" && [ -n "$upstream" ]; then
+              :
+            else
+              echo "::error::找不到已发布标签: $INPUT_REF"
+              exit 1
+            fi
+          fi
+          echo "UPSTREAM_REF=$upstream" >> "$GITHUB_ENV"
+          echo "检出 ${upstream}"
+
+      - uses: actions/checkout@v6
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ env.UPSTREAM_REF }}
+          path: src
+          persist-credentials: false
+
+      - name: allow HTTP relay registry
+        run: |
+          set -euo pipefail
+          relay="$RELAY_REGISTRY"
+          if [ -f /etc/docker/daemon.json ] && command -v jq >/dev/null 2>&1; then
+            sudo jq --arg r "$relay" \
+              '.["insecure-registries"] = ((.["insecure-registries"] // []) + [$r] | unique)' \
+              /etc/docker/daemon.json | sudo tee /etc/docker/daemon.json.new >/dev/null
+            sudo mv /etc/docker/daemon.json.new /etc/docker/daemon.json
+          else
+            printf '%s\n' "{\"insecure-registries\":[\"${relay}\"]}" | sudo tee /etc/docker/daemon.json >/dev/null
+          fi
+          sudo systemctl restart docker
+          sleep 3
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."43.163.118.9:31005"]
+              http = true
+              insecure = true
+
+      - name: login relay
+        env:
+          RELAY_REGISTRY_USER: ${{ secrets.RELAY_REGISTRY_USER }}
+        run: |
+          set -euo pipefail
+          user="${RELAY_REGISTRY_USER:-github}"
+          echo "${{ secrets.RELAY_REGISTRY_PASSWORD }}" | docker login --username="$user" --password-stdin "$RELAY_REGISTRY"
+
+      - name: deepseek-harness
+        env:
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+        run: |
+          exact_tag="$(git -C src describe --tags --exact-match)"
+          test "$exact_tag" = "$UPSTREAM_REF"
+          VERSION=$(node -p "require('./src/package.json').version")
+          test -n "$VERSION"
+          DSH_RUNTIME=$(node -p "require('./src/packages/boot/app-boot/package.json').version")
+          test -n "$DSH_RUNTIME"
+          # 0.2.0-rc.2 -> 0.2.0
+          if [[ "$VERSION" =~ ^((v)?[0-9]+\.[0-9]+\.[0-9]+)([-+].+)?$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+          fi
+          echo "发布版本 ${VERSION}（运行时 ${DSH_RUNTIME}）"
+          COMMIT=$(git -C src rev-parse HEAD)
+          test -n "$COMMIT"
+          base_css=src/packages/client/web/src/base.css
+          test -f "$base_css"
+          grep -q 'yandataai docker: hide left sidebar on narrow viewports' "$base_css" || cat >>"$base_css" <<'PATCH'
+
+          /* yandataai docker: hide left sidebar on narrow viewports (phones) */
+          @media (max-width: 768px) {
+            #root [class*='sidebarCol'] {
+              display: none !important;
+            }
+            #root [class*='frame'] {
+              grid-template-columns: 0 minmax(0, 1fr) 0 !important;
+            }
+            #root [class*='frame'] > [class*='handle'] {
+              display: none !important;
+            }
+            #root [data-shell-leading] {
+              display: none !important;
+            }
+          }
+          PATCH
+          grep -q 'yandataai docker: hide left sidebar on narrow viewports' "$base_css" \
+            || { echo "::error::base.css 窄屏侧栏补丁未合入: $base_css" >&2; exit 1; }
+          echo "已合入 base.css 窄屏侧栏补丁"
+          cat > .dockerignore <<'EOF'
+          src/.git
+          src/.agents
+          src/.claude
+          src/.github
+          EOF
+          cat > docker-entrypoint.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          ensure_runtime_dirs() {
+            mkdir -p /workspace/.dsh/profiles /home/node/.local/share/pnpm /home/node/.cache/node/corepack
+            chown -R node:node /workspace /home/node
+            chmod -R u+rwX,g+rwX /workspace/.dsh /workspace
+            # credentials-local 拒绝 group/other 可读；g+rwX 之后必须收回。
+            if [ -f /workspace/.dsh/.credentials.yaml ]; then
+              chmod 600 /workspace/.dsh/.credentials.yaml
+            fi
+            if [ -f /workspace/.dsh/auth/users.yaml ]; then
+              chmod 600 /workspace/.dsh/auth/users.yaml
+            fi
+          }
+          ensure_web_profile() {
+            tmpl=/opt/dsh-home-template/profiles/web
+            dest=/workspace/.dsh/profiles/web
+            rm -rf "$dest/node_modules"
+            mkdir -p "$dest"
+            if [ -d "$tmpl" ]; then
+              cp -a "$tmpl/." "$dest/"
+            fi
+          }
+          wait_launch_token() {
+            log="$1"
+            pid="$2"
+            i=0
+            while [ "$i" -lt 240 ]; do
+              if ! kill -0 "$pid" 2>/dev/null; then
+                echo "dsh web exited before printing launch token" >&2
+                cat "$log" >&2 || true
+                exit 1
+              fi
+              token=$(sed -n 's/.*dsh web: [^ ]*\/\?token=\([^ )"]*\).*/\1/p' "$log" | sed -n '1p')
+              if [ -n "$token" ]; then
+                echo "$token"
+                return 0
+              fi
+              sleep 0.5
+              i=$((i + 1))
+            done
+            echo "timed out waiting for dsh launch token in log" >&2
+            cat "$log" >&2 || true
+            exit 1
+          }
+          write_nginx_conf() {
+            publish="$1"
+            backend_port="$2"
+            public_token="$3"
+            launch_token="$4"
+            node - "$publish" "$backend_port" "$public_token" "$launch_token" <<'NODE'
+          const fs = require('fs')
+          const [, , publish, backendPort, publicToken, launchToken] = process.argv
+          const esc = (s) => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+          const conf = `map $http_upgrade $connection_upgrade {
+            default upgrade;
+            ''      close;
+          }
+
+          map $arg_token $dsh_backend_args {
+            "${esc(publicToken)}" "token=${esc(launchToken)}";
+            default $args;
+          }
+
+          server {
+            listen ${publish};
+            listen [::]:${publish};
+            server_name _;
+            client_max_body_size 160m;
+
+            location / {
+              proxy_http_version 1.1;
+              # 统一成 loopback，避免为每个公网域名配置 --trusted-host（DSH /api Host 栅栏）。
+              proxy_set_header Host 127.0.0.1:${backendPort};
+              proxy_set_header Origin http://127.0.0.1:${backendPort};
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection $connection_upgrade;
+              proxy_read_timeout 86400s;
+              proxy_send_timeout 86400s;
+              proxy_pass http://127.0.0.1:${backendPort}$uri$is_args$dsh_backend_args;
+            }
+          }
+          `
+          fs.writeFileSync('/etc/nginx/conf.d/dsh-proxy.conf', conf)
+          NODE
+          }
+          build_dsh_web_cmd() {
+            port="${DSH_WEB_PORT:-3081}"
+            # 与原先 pnpm --dir 一样，在源码树里启动，避免把 WORKDIR /workspace 当成仓库根。
+            set -- env --chdir=/opt/deepseek-harness \
+              node /opt/deepseek-harness/apps/cli/lib/bin.js web \
+              --patch /opt/dsh/docker.patch.yml \
+              --port "$port" \
+              --no-open
+          }
+          run_stack() {
+            publish="${DSH_PUBLISH_PORT:-3080}"
+            port="${DSH_WEB_PORT:-3081}"
+            public_token="${DSH_AUTH_TOKEN:?set DSH_AUTH_TOKEN to the fixed public ?token= value}"
+            log=/tmp/dsh-web.log
+            : >"$log"
+            chown node:node "$log"
+            build_dsh_web_cmd
+            runuser -u node --preserve-environment -- bash -c "$(printf '%q ' "$@")" >>"$log" 2>&1 &
+            dsh_pid=$!
+            launch_token=$(wait_launch_token "$log" "$dsh_pid")
+            echo "dsh web: launch token captured (internal only)"
+            write_nginx_conf "$publish" "$port" "$public_token" "$launch_token"
+            echo "dsh web (public): use any reachable URL with ?token=${public_token} (port ${publish} on this container)"
+            nginx -t
+            nginx -g 'daemon off;' &
+            nginx_pid=$!
+            while kill -0 "$dsh_pid" 2>/dev/null && kill -0 "$nginx_pid" 2>/dev/null; do
+              sleep 2
+            done
+            if kill -0 "$nginx_pid" 2>/dev/null; then
+              kill "$nginx_pid" 2>/dev/null || true
+              wait "$nginx_pid" 2>/dev/null || true
+            fi
+            if kill -0 "$dsh_pid" 2>/dev/null; then
+              kill "$dsh_pid" 2>/dev/null || true
+            fi
+            wait "$dsh_pid"
+          }
+          if [ "$(id -u)" = "0" ]; then
+            ensure_runtime_dirs
+            ensure_web_profile
+            chown -R node:node /workspace/.dsh
+            if [ -f /workspace/.dsh/.credentials.yaml ]; then
+              chmod 600 /workspace/.dsh/.credentials.yaml
+            fi
+            if [ -f /workspace/.dsh/auth/users.yaml ]; then
+              chmod 600 /workspace/.dsh/auth/users.yaml
+            fi
+            if [ "$#" -eq 0 ]; then
+              run_stack
+            fi
+            exec runuser -u node --preserve-environment -- /usr/local/bin/docker-entrypoint.sh "$@"
+          fi
+          if [ "$#" -eq 0 ]; then
+            echo "default start must run as root (nginx + dsh stack)" >&2
+            exit 1
+          fi
+          exec "$@"
+          EOF
+          cat > Dockerfile <<'EOF'
+          FROM node:24-bookworm AS builder
+          RUN apt-get update \
+           && apt-get install --yes --no-install-recommends musl-tools \
+           && rm -rf /var/lib/apt/lists/* \
+           && corepack enable \
+           && mkdir -p /opt/deepseek-harness /workspace /opt/dsh-home-template /home/node/.local/share/pnpm /home/node/.cache/node/corepack \
+           && chown node:node /opt/deepseek-harness /workspace /opt/dsh-home-template \
+           && chown -R node:node /home/node
+          WORKDIR /opt/deepseek-harness
+          COPY --chown=node:node src/ ./
+          USER node
+          ARG DSH_CLIENT_COMMIT_HASH
+          ARG DSH_RUNTIME_VERSION
+          ENV CI=true \
+              DSH_HOME=/workspace/.dsh \
+              DSH_TELEMETRY_DISABLED=1 \
+              DSH_CLIENT_COMMIT_HASH=$DSH_CLIENT_COMMIT_HASH \
+              HOME=/workspace \
+              PNPM_HOME=/home/node/.local/share/pnpm \
+              npm_config_store_dir=/home/node/.local/share/pnpm/store \
+              COREPACK_HOME=/home/node/.cache/node/corepack \
+              COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+              PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+              PUPPETEER_SKIP_DOWNLOAD=1 \
+              NODE_OPTIONS=--max-old-space-size=4096
+          RUN corepack prepare pnpm@11.7.0 --activate \
+           && pnpm install --frozen-lockfile \
+           && pnpm run build \
+           && test -f apps/cli/lib/bin.js
+          RUN DSH_HOME=/opt/dsh-home-template node apps/cli/lib/bin.js web --dump-config > /dev/null \
+           && test -d /opt/dsh-home-template/profiles/web \
+           && pnpm store prune \
+           && rm -rf website benchmarks apps/desktop apps/desktop-host apps/web/src \
+           && find . -type f -name '*.map' -delete \
+           && find node_modules/.pnpm -maxdepth 1 \( \
+                -name 'electron@*' -o \
+                -name 'electron-builder@*' -o \
+                -name 'electron-winstaller@*' -o \
+                -name '@electron+*' -o \
+                -name 'playwright@*' -o \
+                -name 'playwright-*@*' -o \
+                -name '@playwright+*' -o \
+                -name 'mermaid@*' -o \
+                -name 'lefthook@*' -o \
+                -name '@yao-pkg+pkg@*' \
+              \) -exec rm -rf {} + \
+           && rm -rf /home/node/.local/share/pnpm/store \
+           && { find /tmp -mindepth 1 -user node -delete 2>/dev/null || true; }
+
+          FROM node:24-bookworm-slim
+          RUN apt-get update \
+           && apt-get install --yes --no-install-recommends tini nginx bash ca-certificates \
+           && rm -rf /var/lib/apt/lists/* \
+           && rm -f /etc/nginx/sites-enabled/default \
+           && mkdir -p /workspace/.dsh/profiles /home/node /workspace /opt/dsh \
+           && chown -R node:node /home/node /workspace /opt/dsh \
+           && chgrp -R 0 /workspace /home/node \
+           && chmod -R g+rwX /workspace /home/node
+          COPY --from=builder /opt/deepseek-harness /opt/deepseek-harness
+          COPY --from=builder /opt/dsh-home-template /opt/dsh-home-template
+          COPY --chown=node:node docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+          RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
+          ARG DSH_CLIENT_COMMIT_HASH
+          ARG DSH_RUNTIME_VERSION
+          ENV CI=true \
+              DSH_HOME=/workspace/.dsh \
+              DSH_TELEMETRY_DISABLED=1 \
+              DSH_CLIENT_COMMIT_HASH=$DSH_CLIENT_COMMIT_HASH \
+              HOME=/workspace
+          RUN printf '%s\n' \
+              '- id: webserver' \
+              '  name: '\''@deepseek-ai/dsh-host-webserver'\''' \
+              '  config:' \
+              '    host: '\''127.0.0.1'\''' \
+              > /opt/dsh/docker.patch.yml \
+           && chmod 0644 /opt/dsh/docker.patch.yml
+          WORKDIR /workspace
+          ENTRYPOINT ["tini", "--", "docker-entrypoint.sh"]
+          # 无参数：dsh web(127.0.0.1:3081) + nginx(3080) 将 DSH_AUTH_TOKEN 换成 launch token；nginx 将 Host/Origin 规范为 loopback。
+          CMD []
+          EOF
+          buildx_push_retry() {
+            local image="$1"
+            shift
+            local i
+            for i in 1 2 3 4 5; do
+              if docker buildx build \
+                --tag "$image" \
+                --provenance=false \
+                --sbom=false \
+                --output "type=registry,compression=gzip,force-compression=true,oci-mediatypes=true,compression-level=3" \
+                "$@"; then
+                return 0
+              fi
+              echo "::warning::docker push attempt ${i}/5 failed for ${image}"
+              sleep $((i * 20))
+            done
+            echo "::error::docker push failed for ${image}; printing layer sizes"
+            docker buildx build --tag "$image" --load --provenance=false --sbom=false "$@" || true
+            docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}' "$image" || true
+            docker history --human --no-trunc --format 'table {{.Size}}\t{{.CreatedBy}}' "$image" || true
+            docker buildx imagetools inspect "$image" || true
+            return 1
+          }
+          image="${RELAY_REGISTRY}/syncimage/deepseek-harness:${VERSION}"
+          echo "推送到中转 ${image}（relay 将同步至 registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness:${VERSION}）"
+          buildx_push_retry "$image" --build-arg DSH_CLIENT_COMMIT_HASH="$COMMIT" --build-arg DSH_RUNTIME_VERSION="$DSH_RUNTIME" .

@@ -1,0 +1,22 @@
+services:
+  harness:
+    image: "registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness:0.2.0"
+    restart: always
+    ports:
+      - 3080:3080
+    networks:
+      - harnessnet
+    environment:
+      TZ: Asia/Shanghai
+      DSH_AUTH_TOKEN: "xxxxxxx"
+    volumes:
+      - /home/dsh/workspace:/workspace
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "5"
+        max-size: "100m"
+
+networks:
+  harnessnet:
+    driver: bridge
