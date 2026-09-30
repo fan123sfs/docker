@@ -1,0 +1,91 @@
+diff --git a/android/src/main/AndroidManifest.xml b/android/src/main/AndroidManifest.xml
+index 9633e2b..d47c792 100644
+--- a/android/src/main/AndroidManifest.xml
++++ b/android/src/main/AndroidManifest.xml
+@@ -11,6 +11,7 @@
+     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
++    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
+     <uses-permission
+         android:name="android.permission.QUERY_ALL_PACKAGES"
+@@ -110,6 +111,19 @@
+             </intent-filter>
+         </receiver>
+ 
++        <receiver
++            android:name=".headscale.BootCompletedReceiver"
++            android:enabled="true"
++            android:exported="false">
++            <intent-filter android:priority="999">
++                <action android:name="android.intent.action.BOOT_COMPLETED" />
++                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
++                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
++                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
++                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
++            </intent-filter>
++        </receiver>
++
+         <service
+             android:name=".IPNService"
+             android:exported="false"
+diff --git a/android/src/main/java/com/tailscale/ipn/ui/view/MainView.kt b/android/src/main/java/com/tailscale/ipn/ui/view/MainView.kt
+index 23a22b2..2677146 100644
+--- a/android/src/main/java/com/tailscale/ipn/ui/view/MainView.kt
++++ b/android/src/main/java/com/tailscale/ipn/ui/view/MainView.kt
+@@ -61,6 +61,7 @@ import androidx.compose.ui.draw.clip
+ import androidx.compose.ui.focus.onFocusChanged
+ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.platform.LocalClipboardManager
++import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.platform.LocalFocusManager
+ import androidx.compose.ui.platform.LocalUriHandler
+ import androidx.compose.ui.res.painterResource
+@@ -79,6 +80,9 @@ import androidx.lifecycle.repeatOnLifecycle
+ import com.google.accompanist.permissions.ExperimentalPermissionsApi
+ import com.tailscale.ipn.App
+ import com.tailscale.ipn.R
++import com.tailscale.ipn.headscale.HeadscaleConfigDialog
++import com.tailscale.ipn.headscale.HeadscaleConfigStore
++import com.tailscale.ipn.headscale.HeadscaleLoginWorker
+ import com.tailscale.ipn.mdm.MDMSettings
+ import com.tailscale.ipn.mdm.ShowHide
+ import com.tailscale.ipn.ui.Links
+@@ -245,6 +249,24 @@ fun MainView(
+                     { viewModel.showVPNPermissionLauncherIfUnauthorized() })
+               }
+             }
++            if (state == Ipn.State.NeedsLogin) {
++              val context = LocalContext.current
++              LaunchedEffect(Unit) {
++                val cfg = HeadscaleConfigStore.loadConfig(context)
++                if (cfg != null) {
++                  HeadscaleLoginWorker.enqueue(context, cfg.loginServer, cfg.authKey)
++                }
++              }
++              HeadscaleConfigDialog(
++                  initialText = HeadscaleConfigStore.loadJson(context),
++                  onSubmit = { json ->
++                    HeadscaleConfigStore.saveJson(context, json)
++                    val cfg = HeadscaleConfigStore.parse(json)
++                    if (cfg != null) {
++                      HeadscaleLoginWorker.enqueue(context, cfg.loginServer, cfg.authKey)
++                    }
++                  })
++            }
+           }
+       currentPingDevice?.let { _ ->
+         ModalBottomSheet(onDismissRequest = { viewModel.onPingDismissal() }) {
+@@ -748,7 +770,10 @@ fun ExpiryNotification(netmap: Netmap.NetworkMap?, action: () -> Unit = {}) {
+ @OptIn(ExperimentalPermissionsApi::class)
+ @Composable
+ fun PromptForMissingPermissions(viewModel: MainViewModel) {
+-  if (viewModel.skipPromptsForAuthKeyLogin()) {
++  // Headscale build: skip the official Notifications rationale dialog after auth-key login.
++  // Its Continue button only launches the system permission prompt and cannot dismiss itself.
++  if (viewModel.skipPromptsForAuthKeyLogin() ||
++      HeadscaleConfigStore.loadConfig(LocalContext.current) != null) {
+     return
+   }
+   Permissions.prompt.forEach { (permission, state) ->

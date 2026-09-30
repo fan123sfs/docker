@@ -1,0 +1,136 @@
+﻿diff --git a/client/Android/Studio/aFreeRDP/src/main/AndroidManifest.xml b/client/Android/Studio/aFreeRDP/src/main/AndroidManifest.xml
+index d7e9c25..e773df2 100644
+--- a/client/Android/Studio/aFreeRDP/src/main/AndroidManifest.xml
++++ b/client/Android/Studio/aFreeRDP/src/main/AndroidManifest.xml
+@@ -6,7 +6,7 @@
+     <application
+         android:name="com.freerdp.afreerdp.application.GlobalApp"
+         android:icon="@mipmap/ic_launcher"
+-        android:label="aFreeRDP"
++        android:label="freerdp"
+         android:resizeableActivity="true">
+ 
+         <!-- Main activity -->
+diff --git a/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/data/BookmarkDao.java b/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/data/BookmarkDao.java
+index 40651fa..d2f10e1 100644
+--- a/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/data/BookmarkDao.java
++++ b/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/data/BookmarkDao.java
+@@ -47,4 +47,6 @@ public interface BookmarkDao {
+ 	@Delete void delete(BookmarkEntity entity);
+ 
+ 	@Query("DELETE FROM bookmarks WHERE id = :id") void deleteById(long id);
++
++	@Query("DELETE FROM bookmarks") void deleteAll();
+ }
+diff --git a/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/presentation/HomeActivity.java b/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/presentation/HomeActivity.java
+index 1292680..1dad6ea 100644
+--- a/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/presentation/HomeActivity.java
++++ b/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/presentation/HomeActivity.java
+@@ -32,6 +32,7 @@ import androidx.lifecycle.ViewModelProvider;
+ import androidx.recyclerview.widget.LinearLayoutManager;
+ 
+ import com.freerdp.freerdpcore.R;
++import com.freerdp.freerdpcore.custom.RemoteDesktopConfigDialog;
+ import com.freerdp.freerdpcore.databinding.HomeBinding;
+ import com.freerdp.freerdpcore.domain.BookmarkBase;
+ import com.freerdp.freerdpcore.domain.ConnectionReference;
+@@ -208,6 +209,10 @@ public class HomeActivity extends AppCompatActivity
+ 			Intent aboutIntent = new Intent(this, AboutActivity.class);
+ 			startActivity(aboutIntent);
+ 		}
++		else if (itemId == R.id.jsonBookmarks)
++		{
++			RemoteDesktopConfigDialog.show(this, viewModel);
++		}
+ 
+ 		return true;
+ 	}
+diff --git a/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/presentation/HomeViewModel.java b/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/presentation/HomeViewModel.java
+index ad67653..7b4b37e 100644
+--- a/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/presentation/HomeViewModel.java
++++ b/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/presentation/HomeViewModel.java
+@@ -19,6 +19,7 @@ import androidx.lifecycle.MutableLiveData;
+ 
+ import com.freerdp.freerdpcore.data.AppDatabase;
+ import com.freerdp.freerdpcore.data.HistoryDatabase;
++import com.freerdp.freerdpcore.custom.RemoteDesktopConfigImporter;
+ import com.freerdp.freerdpcore.domain.BookmarkBase;
+ import com.freerdp.freerdpcore.services.ManualBookmarkGateway;
+ import com.freerdp.freerdpcore.services.QuickConnectHistoryGateway;
+@@ -28,6 +29,7 @@ import java.util.Collections;
+ import java.util.List;
+ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
++import java.util.function.Consumer;
+ 
+ public class HomeViewModel extends AndroidViewModel
+ {
+@@ -90,6 +92,25 @@ public class HomeViewModel extends AndroidViewModel
+ 		});
+ 	}
+ 
++	public void applyJsonConfig(String json, Consumer<Boolean> onComplete)
++	{
++		executor.execute(() -> {
++			boolean ok = false;
++			try
++			{
++				RemoteDesktopConfigImporter.apply(getApplication(), json);
++				loadBookmarks(currentQuery);
++				ok = true;
++			}
++			catch (Exception e)
++			{
++				ok = false;
++			}
++			if (onComplete != null)
++				onComplete.accept(ok);
++		});
++	}
++
+ 	@Override protected void onCleared()
+ 	{
+ 		super.onCleared();
+diff --git a/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/services/ManualBookmarkGateway.java b/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/services/ManualBookmarkGateway.java
+index 9f41792..f106284 100644
+--- a/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/services/ManualBookmarkGateway.java
++++ b/client/Android/Studio/freeRDPCore/src/main/java/com/freerdp/freerdpcore/services/ManualBookmarkGateway.java
+@@ -68,6 +68,11 @@ public class ManualBookmarkGateway
+ 		return true;
+ 	}
+ 
++	public void deleteAll()
++	{
++		dao.deleteAll();
++	}
++
+ 	public ArrayList<BookmarkBase> findByLabelOrHostnameLike(String pattern)
+ 	{
+ 		List<BookmarkEntity> entities = dao.search("%" + pattern + "%");
+diff --git a/client/Android/Studio/freeRDPCore/src/main/res/menu/home_menu.xml b/client/Android/Studio/freeRDPCore/src/main/res/menu/home_menu.xml
+index 48ea836..15adbc3 100644
+--- a/client/Android/Studio/freeRDPCore/src/main/res/menu/home_menu.xml
++++ b/client/Android/Studio/freeRDPCore/src/main/res/menu/home_menu.xml
+@@ -32,4 +32,9 @@
+         android:icon="@drawable/ic_menu_about"
+         app:showAsAction="ifRoom"
+         android:title="@string/menu_about" />
++
++    <item
++        android:id="@+id/jsonBookmarks"
++        android:title="@string/menu_json_bookmarks"
++        app:showAsAction="never" />
+ </menu>
+diff --git a/client/Android/Studio/freeRDPCore/src/main/res/values/strings.xml b/client/Android/Studio/freeRDPCore/src/main/res/values/strings.xml
+index e754933..eed7175 100644
+--- a/client/Android/Studio/freeRDPCore/src/main/res/values/strings.xml
++++ b/client/Android/Studio/freeRDPCore/src/main/res/values/strings.xml
+@@ -274,7 +274,7 @@
+     <string name="preference_key_experimental_camera" translatable="false">experimental.camera</string>
+     <string name="preference_key_client_name" translatable="false">preference_key_client_name</string>
+     <string name="preference_title_client_name">Client Name</string>
+-    <string name="preference_default_client_name" translatable="false">aFreeRDP</string>
++    <string name="preference_default_client_name" translatable="false">freerdp</string>
+     <string name="preference_key_accept_certificates" translatable="false">security.accept_certificates</string>
+     <string name="preference_key_security_clear_certificate_cache" translatable="false">security.clear_certificate_cache</string>
+     <string name="preference_key_power_disconnect_timeout" translatable="false">power.disconnect_timeout</string>
