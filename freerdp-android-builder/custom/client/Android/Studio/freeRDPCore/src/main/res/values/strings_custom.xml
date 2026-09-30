@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="menu_json_bookmarks">JSON 远程桌面</string>
+    <string name="json_bookmarks_invalid">JSON 无效或缺少 hostname</string>
+    <string name="json_bookmarks_applied">已导入远程桌面配置</string>
+    <string name="json_bookmarks_failed">导入失败，请检查 JSON</string>
+    <string name="json_bookmarks_paste">粘贴</string>
+    <string name="json_bookmarks_save">保存</string>
+    <string name="json_bookmarks_clipboard_empty">剪贴板没有文本</string>
+</resources>
