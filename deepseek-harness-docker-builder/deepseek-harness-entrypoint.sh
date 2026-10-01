@@ -37,7 +37,7 @@ wait_launch_token() {
     fi
     token=
     if [ -f "$log" ]; then
-      token=$(sed -n 's/.*dsh web: [^ ]*\/\?token=\([^ )"]*\).*/\1/p' "$log" | sed -n '1p' || true)
+      token=$(sed -n 's/.*dsh web: http[^?]*\?token=\([^ )"]*\).*/\1/p' "$log" | sed -n '1p' || true)
     fi
     if [ -n "$token" ]; then
       echo "$token"

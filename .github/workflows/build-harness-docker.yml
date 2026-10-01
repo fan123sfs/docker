@@ -226,8 +226,13 @@ jobs:
           RUN printf '%s\n' \
               '- id: webserver' \
               '  name: '\''@deepseek-ai/dsh-host-webserver'\''' \
+              '  inject: [webStartup]' \
               '  config:' \
               '    host: '\''127.0.0.1'\''' \
+              '    port: !!js ctx.webStartup.port ?? 3081' \
+              '    compression: gzip' \
+              '    compressionLevel: 1' \
+              '    compressionThresholdBytes: 1024' \
               > /opt/dsh/docker.patch.yml \
            && chmod 0644 /opt/dsh/docker.patch.yml
           WORKDIR /workspace
