@@ -13,7 +13,14 @@ REGISTRY_CONTAINER="${REGISTRY_CONTAINER:-acr-relay-registry}"
 GC_IMAGE="${GC_IMAGE:-registry:3.1.2}"
 REGISTRY_CONFIG="${REGISTRY_CONFIG:-/etc/distribution/config.yml}"
 WORK_DIR="${WORK_DIR:-/tmp/acr-relay}"
-COPY_TIMEOUT_SECONDS="${COPY_TIMEOUT_SECONDS:-600}"
+COPY_TIMEOUT_SECONDS="${COPY_TIMEOUT_SECONDS:-3600}"
+COPY_JOBS="${COPY_JOBS:-3}"
+case "$COPY_JOBS" in
+  ''|*[!0-9]*) COPY_JOBS=3 ;;
+esac
+if [ "$COPY_JOBS" -lt 1 ]; then
+  COPY_JOBS=1
+fi
 
 need_var() {
   eval "val=\${$1-}"
@@ -120,9 +127,9 @@ forward_tag() {
     log "阿里云已有 $dst，跳过 copy"
   else
     log "转发 $src -> $dst（超时 ${COPY_TIMEOUT_SECONDS}s）"
-    if ! timeout "$COPY_TIMEOUT_SECONDS" regctl image copy --fast "$src" "$dst"; then
+    if ! timeout -s KILL -k 10 "$COPY_TIMEOUT_SECONDS" regctl image copy --fast "$src" "$dst"; then
       ec=$?
-      if [ "$ec" -eq 124 ] || [ "$ec" -eq 143 ]; then
+      if [ "$ec" -eq 124 ] || [ "$ec" -eq 137 ] || [ "$ec" -eq 143 ]; then
         log "转发超时，保留本地 $src"
       else
         log "转发失败，保留本地 $src"
@@ -143,10 +150,14 @@ forward_tag() {
 }
 
 scan_once() {
-  deleted=0
+  job_file="$WORK_DIR/jobs"
+  copied_file="$WORK_DIR/copied"
   repo_file="$WORK_DIR/repos"
   tag_file="$WORK_DIR/tags"
   : >"$repo_file"
+  : >"$job_file"
+  : >"$copied_file"
+  jobs="$COPY_JOBS"
   regctl repo ls "$LOCAL_REGISTRY" >"$repo_file" 2>/dev/null || true
   if [ ! -s "$repo_file" ]; then
     return 1
@@ -161,18 +172,34 @@ scan_once() {
     fi
     while IFS= read -r tag || [ -n "$tag" ]; do
       [ -n "$tag" ] || continue
-      if forward_tag "$repo" "$tag"; then
-        deleted=1
-      fi
+      printf '%s %s\n' "$repo" "$tag" >>"$job_file"
     done <"$tag_file"
   done <"$repo_file"
-  if [ "$deleted" -eq 1 ]; then
+  if [ ! -s "$job_file" ]; then
+    return 1
+  fi
+  n=0
+  while IFS= read -r repo tag || [ -n "$repo" ]; do
+    [ -n "$repo" ] && [ -n "$tag" ] || continue
+    (
+      if forward_tag "$repo" "$tag"; then
+        echo 1 >>"$copied_file"
+      fi
+    ) &
+    n=$((n + 1))
+    if [ "$n" -ge "$jobs" ]; then
+      wait
+      n=0
+    fi
+  done <"$job_file"
+  wait
+  if [ -s "$copied_file" ]; then
     return 0
   fi
   return 1
 }
 
-log "中转启动，本地 $LOCAL_REGISTRY -> $ALIYUN_REGISTRY"
+log "中转启动，本地 $LOCAL_REGISTRY -> $ALIYUN_REGISTRY，超时 ${COPY_TIMEOUT_SECONDS}s，并发 ${COPY_JOBS}"
 wait_registry
 login_all
 if ! verify_aliyun_login >/dev/null 2>&1; then

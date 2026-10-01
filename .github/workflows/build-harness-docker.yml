@@ -260,4 +260,28 @@ jobs:
           }
           image="${RELAY_REGISTRY}/syncimage/deepseek-harness:${VERSION}"
           echo "推送到中转 ${image}（relay 将同步至 registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness:${VERSION}）"
-          buildx_push_retry "$image" --build-arg DSH_CLIENT_COMMIT_HASH="$COMMIT" --build-arg DSH_RUNTIME_VERSION="$DSH_RUNTIME" .
+          buildx_push_retry "$image" --build-arg DSH_CLIENT_COMMIT_HASH="$COMMIT" --build-arg DSH_RUNTIME_VERSION="$DSH_RUNTIME" . || exit 1
+          wait_relay_to_acr() {
+            local src="$1"
+            local dst="$2"
+            local digest="" i got=""
+            digest="$(docker buildx imagetools inspect "$src" 2>/dev/null | awk '/^Digest:/{print $2; exit}')"
+            if [ -z "$digest" ]; then
+              echo "::error::无法读取中转 digest: $src"
+              return 1
+            fi
+            echo "${{ secrets.ALIYUN_PASSWORD }}" | docker login --username="${{ secrets.ALIYUN_USERNAME }}" --password-stdin registry.cn-hangzhou.aliyuncs.com
+            echo "等待中转把 ${digest} 传到 ${dst}"
+            for i in $(seq 1 80); do
+              got="$(docker buildx imagetools inspect "$dst" 2>/dev/null | awk '/^Digest:/{print $2; exit}' || true)"
+              if [ -n "$got" ] && [ "$got" = "$digest" ]; then
+                echo "中转已传到阿里云 ${dst}"
+                return 0
+              fi
+              echo "等待中转转发 (${i}/80)，阿里云 digest=${got:-无}"
+              sleep 15
+            done
+            echo "::error::中转未在时限内把镜像传到阿里云: ${dst}"
+            return 1
+          }
+          wait_relay_to_acr "$image" "registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness:${VERSION}"
