@@ -6,7 +6,7 @@ on:
       akshare_version:
         required: false
         type: string
-        default: "1.18.95"
+        default: "1.19.1"
       aktools_version:
         required: false
         type: string

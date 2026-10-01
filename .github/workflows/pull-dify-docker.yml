@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     # 逗号分隔的 name，不要加空格；只执行写在这里的 run
     env:
-      ONLY: nginx
+      ONLY: busybox,dify-api,dify-web,postgres,redis,sandbox,local-sandbox,plugin-daemon,agent-backend,squid,weaviate,nginx
     steps:
       - uses: actions/checkout@v6
 
