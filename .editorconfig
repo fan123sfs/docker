@@ -1,0 +1,17 @@
+root = true
+
+[*]
+charset = utf-8
+
+[*.sh]
+end_of_line = lf
+insert_final_newline = true
+
+[*.bash]
+end_of_line = lf
+
+[*.yml]
+end_of_line = lf
+
+[*.yaml]
+end_of_line = lf

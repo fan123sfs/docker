@@ -29,7 +29,7 @@ jobs:
               exit 1
               ;;
           esac
-          for f in registry-relay/relay/Dockerfile registry-relay/relay/relay.sh; do
+          for f in registry-relay-docker-builder/Dockerfile registry-relay-docker-builder/relay.sh; do
             if [ ! -f "$f" ]; then
               echo "::error::缺少文件: $f"
               ls -la "$(dirname "$f")" || true
@@ -74,4 +74,4 @@ jobs:
             docker buildx imagetools inspect "$image" || true
             return 1
           }
-          buildx_push_retry "registry.cn-hangzhou.aliyuncs.com/syncimage/acr-relay:${VERSION}" ./registry-relay/relay
+          buildx_push_retry "registry.cn-hangzhou.aliyuncs.com/syncimage/acr-relay:${VERSION}" ./registry-relay-docker-builder
