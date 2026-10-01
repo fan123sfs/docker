@@ -52,6 +52,12 @@ login_all() {
     -u "$ALIYUN_USERNAME" --pass-stdin --skip-check
 }
 
+verify_local_login() {
+  regctl_local_tls
+  printf '%s' "$REGISTRY_PASSWORD" | regctl -v error registry login "$LOCAL_REGISTRY" \
+    -u "$REGISTRY_USER" --pass-stdin
+}
+
 verify_aliyun_login() {
   printf '%s' "$ALIYUN_PASSWORD" | regctl -v error registry login "$ALIYUN_REGISTRY" \
     -u "$ALIYUN_USERNAME" --pass-stdin
@@ -123,9 +129,20 @@ forward_tag() {
   tag="$2"
   src="${LOCAL_REGISTRY}/${repo}:${tag}"
   dst="${ALIYUN_REGISTRY}/${repo}:${tag}"
+  need_copy=1
+  src_digest=$(regctl manifest digest "$src" 2>/dev/null || true)
   if regctl manifest head "$dst" >/dev/null 2>&1; then
-    log "阿里云已有 $dst，跳过 copy"
-  else
+    dst_digest=$(regctl manifest digest "$dst" 2>/dev/null || true)
+    if [ -n "$src_digest" ] && [ -n "$dst_digest" ] && [ "$src_digest" = "$dst_digest" ]; then
+      log "阿里云已有 $dst（digest 一致），跳过 copy"
+      need_copy=0
+    elif [ -n "$src_digest" ] && [ -n "$dst_digest" ]; then
+      log "阿里云 $dst 与中转 digest 不一致（远端 $dst_digest，中转 $src_digest），重新转发"
+    else
+      log "无法比对 $dst 与中转 digest，尝试转发"
+    fi
+  fi
+  if [ "$need_copy" -eq 1 ]; then
     log "转发 $src -> $dst（超时 ${COPY_TIMEOUT_SECONDS}s）"
     if ! timeout -s KILL -k 10 "$COPY_TIMEOUT_SECONDS" regctl image copy --fast "$src" "$dst"; then
       ec=$?
@@ -202,6 +219,10 @@ scan_once() {
 log "中转启动，本地 $LOCAL_REGISTRY -> $ALIYUN_REGISTRY，超时 ${COPY_TIMEOUT_SECONDS}s，并发 ${COPY_JOBS}"
 wait_registry
 login_all
+if ! verify_local_login >/dev/null 2>&1; then
+  log "本地中转仓登录校验失败，请检查 REGISTRY_USER / REGISTRY_PASSWORD 是否与 registry htpasswd（auth-init）一致"
+  exit 1
+fi
 if ! verify_aliyun_login >/dev/null 2>&1; then
   log "阿里云登录校验失败，请检查 ALIYUN_USERNAME / ALIYUN_PASSWORD"
   exit 1
