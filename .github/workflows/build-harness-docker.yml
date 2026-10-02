@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: build-harness-docker-${{ inputs.ref }}
@@ -20,8 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      # 新加坡 acr-relay 对外端口；relay 会转发到 registry.cn-hangzhou.aliyuncs.com/syncimage/...
-      RELAY_REGISTRY: 43.163.118.9:31005
+      # 上游镜像库（GHCR）；relay 会转发到 registry.cn-hangzhou.aliyuncs.com/syncimage/...
+      # GHCR 包名必须全小写
+      GHCR_OWNER: ${{ github.repository_owner }}
     steps:
       - name: ref
         env:
@@ -72,41 +74,20 @@ jobs:
           path: src
           persist-credentials: false
 
-      - name: allow HTTP relay registry
-        run: |
-          set -euo pipefail
-          relay="$RELAY_REGISTRY"
-          if [ -f /etc/docker/daemon.json ] && command -v jq >/dev/null 2>&1; then
-            sudo jq --arg r "$relay" \
-              '.["insecure-registries"] = ((.["insecure-registries"] // []) + [$r] | unique)' \
-              /etc/docker/daemon.json | sudo tee /etc/docker/daemon.json.new >/dev/null
-            sudo mv /etc/docker/daemon.json.new /etc/docker/daemon.json
-          else
-            printf '%s\n' "{\"insecure-registries\":[\"${relay}\"]}" | sudo tee /etc/docker/daemon.json >/dev/null
-          fi
-          sudo systemctl restart docker
-          sleep 3
-
       - uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: network=host
-          buildkitd-config-inline: |
-            [registry."43.163.118.9:31005"]
-              http = true
-              insecure = true
 
-      - name: login relay
-        env:
-          RELAY_REGISTRY_USER: ${{ secrets.RELAY_REGISTRY_USER }}
+      - name: login ghcr
         run: |
           set -euo pipefail
-          user="${RELAY_REGISTRY_USER:-github}"
-          echo "${{ secrets.RELAY_REGISTRY_PASSWORD }}" | docker login --username="$user" --password-stdin "$RELAY_REGISTRY"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username="${{ github.actor }}" --password-stdin
 
       - name: deepseek-harness
         env:
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
         run: |
+          set -euo pipefail
+          GHCR_OWNER="${GHCR_OWNER,,}"
+          test -n "$GHCR_OWNER"
           exact_tag="$(git -C src describe --tags --exact-match)"
           test "$exact_tag" = "$UPSTREAM_REF"
           VERSION=$(node -p "require('./src/package.json').version")
@@ -289,8 +270,8 @@ jobs:
             docker buildx imagetools inspect "$image" || true
             return 1
           }
-          image="${RELAY_REGISTRY}/syncimage/deepseek-harness:${VERSION}"
-          echo "推送到中转 ${image}（relay 将同步至 registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness:${VERSION}）"
+          image="ghcr.io/${GHCR_OWNER}/deepseek-harness:${VERSION}"
+          echo "推送到上游 ${image}（relay 将同步至 registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness:${VERSION}）"
           buildx_push_retry "$image" --build-arg DSH_CLIENT_COMMIT_HASH="$COMMIT" --build-arg DSH_RUNTIME_VERSION="$DSH_RUNTIME" . || exit 1
-          digest="$(docker buildx imagetools inspect "$image" 2>/dev/null | awk '/^Digest:/{print $2; exit}')"
-          echo "已推到中转 ${image}（digest=${digest:-未知}）；同步至 registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness:${VERSION} 由 relay 负责"
+          digest="$(docker buildx imagetools inspect "$image" 2>/dev/null | awk '/^Digest:/{print $2; exit}')" || true
+          echo "已推到上游 ${image}（digest=${digest:-未知}）；同步至 registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness:${VERSION} 由 relay 负责"

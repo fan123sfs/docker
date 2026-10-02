@@ -3,7 +3,7 @@ FROM docker:27-cli
 ARG REGCTL_VERSION=v0.8.3
 ARG TARGETARCH=amd64
 
-RUN apk add --no-cache apache2-utils ca-certificates curl \
+RUN apk add --no-cache ca-certificates curl \
  && curl -fsSL -o /usr/local/bin/regctl \
       "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-${TARGETARCH}" \
  && chmod +x /usr/local/bin/regctl \
