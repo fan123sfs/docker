@@ -201,6 +201,25 @@ jobs:
               \) -exec rm -rf {} + \
            && rm -rf /home/node/.local/share/pnpm/store \
            && { find /tmp -mindepth 1 -user node -delete 2>/dev/null || true; }
+          # 最终镜像按目录分 COPY：apps / packages / 根文件 / node_modules 链 + .pnpm 五等分
+          RUN mkdir -p /opt/dsh-image/root /opt/dsh-image/nm-link \
+               /opt/dsh-image/pnpm-0 /opt/dsh-image/pnpm-1 /opt/dsh-image/pnpm-2 \
+               /opt/dsh-image/pnpm-3 /opt/dsh-image/pnpm-4 \
+           && cd /opt/deepseek-harness \
+           && tar -c --exclude=./apps --exclude=./packages --exclude=./node_modules -f - . \
+              | tar -x -C /opt/dsh-image/root \
+           && cd node_modules \
+           && i=0 \
+           && for d in .pnpm/*; do \
+                [ -d "$d" ] || continue; \
+                mv "$d" "/opt/dsh-image/pnpm-$((i % 5))/$(basename "$d")"; \
+                i=$((i + 1)); \
+              done \
+           && rmdir .pnpm 2>/dev/null || true \
+           && for e in *; do \
+                [ -e "$e" ] || continue; \
+                cp -a "$e" /opt/dsh-image/nm-link/; \
+              done
 
           FROM node:24-bookworm-slim
           RUN apt-get update \
@@ -211,9 +230,16 @@ jobs:
            && chown -R node:node /home/node /workspace /opt/dsh \
            && chgrp -R 0 /workspace /home/node \
            && chmod -R g+rwX /workspace /home/node
-          COPY --from=builder /opt/deepseek-harness /opt/deepseek-harness
-          COPY --from=builder /opt/dsh-home-template /opt/dsh-home-template
-          RUN chown -R node:node /opt/deepseek-harness /opt/dsh-home-template
+          COPY --chown=node:node --from=builder /opt/deepseek-harness/apps /opt/deepseek-harness/apps
+          COPY --chown=node:node --from=builder /opt/deepseek-harness/packages /opt/deepseek-harness/packages
+          COPY --chown=node:node --from=builder /opt/dsh-image/pnpm-0/ /opt/deepseek-harness/node_modules/.pnpm/
+          COPY --chown=node:node --from=builder /opt/dsh-image/pnpm-1/ /opt/deepseek-harness/node_modules/.pnpm/
+          COPY --chown=node:node --from=builder /opt/dsh-image/pnpm-2/ /opt/deepseek-harness/node_modules/.pnpm/
+          COPY --chown=node:node --from=builder /opt/dsh-image/pnpm-3/ /opt/deepseek-harness/node_modules/.pnpm/
+          COPY --chown=node:node --from=builder /opt/dsh-image/pnpm-4/ /opt/deepseek-harness/node_modules/.pnpm/
+          COPY --chown=node:node --from=builder /opt/dsh-image/nm-link/ /opt/deepseek-harness/node_modules/
+          COPY --chown=node:node --from=builder /opt/dsh-image/root/ /opt/deepseek-harness/
+          COPY --chown=node:node --from=builder /opt/dsh-home-template /opt/dsh-home-template
           COPY --chown=node:node docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
           RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
           ARG DSH_CLIENT_COMMIT_HASH

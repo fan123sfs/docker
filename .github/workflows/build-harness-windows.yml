@@ -24,26 +24,6 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: git long paths
-        run: git config --system core.longpaths true || git config --global core.longpaths true
-
-      # Packaged LibreOffice lives under win-unpacked on D: while Node's tmpdir is
-      # C:\Users\...\Temp. Calc then fails loadComponentFromURL; Writer still works.
-      # Keep artifacts and TEMP on a short same-drive path, and stop Defender from
-      # locking newly signed PE files during the packaged smoke.
-      - name: windows ci paths
-        shell: pwsh
-        run: |
-          New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force | Out-Null
-          New-Item -ItemType Directory -Force -Path 'D:\b', 'D:\t' | Out-Null
-          foreach ($p in @('D:\b', 'D:\t', $env:GITHUB_WORKSPACE)) {
-            Add-MpPreference -ExclusionPath $p -ErrorAction SilentlyContinue
-          }
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          if (-not (Test-Path 'D:\b') -or -not (Test-Path 'D:\t')) {
-            throw 'windows ci paths: expected D:\b and D:\t'
-          }
-
       - name: ref
         env:
           INPUT_REF: ${{ inputs.ref }}
@@ -84,6 +64,30 @@ jobs:
           echo "UPSTREAM_REF=$upstream" >> "$GITHUB_ENV"
           echo "检出 ${upstream}"
 
+      - name: git long paths
+        run: git config --system core.longpaths true || git config --global core.longpaths true
+
+      # Packaged LibreOffice lives under win-unpacked on D: while Node's tmpdir is
+      # C:\Users\...\Temp. Calc then fails loadComponentFromURL; Writer still works.
+      # Keep artifacts and TEMP on a short same-drive path, and stop Defender from
+      # locking newly signed PE files during the packaged smoke.
+      - name: windows ci paths
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force | Out-Null
+          New-Item -ItemType Directory -Force -Path 'D:\b', 'D:\t' | Out-Null
+          foreach ($p in @('D:\b', 'D:\t', $env:GITHUB_WORKSPACE)) {
+            Add-MpPreference -ExclusionPath $p -ErrorAction SilentlyContinue
+          }
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+          if (-not (Test-Path 'D:\b') -or -not (Test-Path 'D:\t')) {
+            throw 'windows ci paths: expected D:\b and D:\t'
+          }
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
       - uses: actions/checkout@v6
         with:
           repository: deepseek-ai/deepseek-harness
@@ -112,13 +116,31 @@ jobs:
           restore-keys: |
             dsh-desktop-win-
 
-      - name: deepseek-harness-desktop
+      - name: patch upstream
         working-directory: src
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          DSH_DESKTOP_BUILD_ROOT: D:/b
+        run: node ../deepseek-harness-windows-builder/scripts/patch-upstream.mjs
+
+      - name: install
+        working-directory: src
+        run: pnpm install --frozen-lockfile
+
+      - name: env windows
+        working-directory: src
+        env:
           DSH_DESKTOP_APP_ID: ai.deepseek.harness
           # .env.windows.example leaves this empty; test policy requires HTTPS origin.
           DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN: https://updates.example.com
+        run: |
+          test -f apps/desktop/.env.windows.example
+          cp apps/desktop/.env.windows.example apps/desktop/.env.windows
+          node ../deepseek-harness-windows-builder/scripts/configure-env-windows.mjs
+
+      - name: package desktop
+        working-directory: src
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
           # Git Bash GNU tar treats D:\... as host:path; force a local archive.
           TAR_OPTIONS: "--force-local"
           MSYS_NO_PATHCONV: "1"
@@ -129,102 +151,6 @@ jobs:
         run: |
           exact_tag="$(git describe --tags --exact-match)"
           test "$exact_tag" = "$UPSTREAM_REF"
-          # Upstream still smokes fs-ext, but the production graph no longer
-          # depends on it (flock moved to @deepseek-ai/node-addon-system).
-          # package-target.ts statically imports macos-notarization-proxy, which
-          # pulls flock at load time even for win-x64; defer that import to darwin paths.
-          node <<'EOF'
-          const fs = require('fs')
-
-          const smokePath = 'apps/desktop/tests/fixtures/runtime-payload-smoke.mjs'
-          const smoke = fs.readFileSync(smokePath, 'utf8')
-          const checkFsExtCall = '  checkFsExt()\n'
-          if (smoke.includes(checkFsExtCall)) {
-            fs.writeFileSync(smokePath, smoke.replace(checkFsExtCall, `  try {
-              checkFsExt()
-            } catch (error) {
-              if (error?.code !== 'MODULE_NOT_FOUND') throw error
-            }
-            `))
-          } else if (smoke.includes('checkFsExt')) {
-            if (!smoke.includes('MODULE_NOT_FOUND')) {
-              throw new Error('checkFsExt() present but not in expected form')
-            }
-          }
-
-          const packageTargetPath = 'apps/desktop/scripts/package-target.ts'
-          let packageTarget = fs.readFileSync(packageTargetPath, 'utf8')
-          const proxyImport = "import { withMacOSNotarizationProxy } from './macos-notarization-proxy.ts'\n"
-          const proxyDynamic = "await (await import('./macos-notarization-proxy.ts')).withMacOSNotarizationProxy("
-          if (packageTarget.includes(proxyImport)) {
-            packageTarget = packageTarget.replace(proxyImport, '')
-            if (!packageTarget.includes('withMacOSNotarizationProxy(')) {
-              throw new Error('macos-notarization-proxy import present but no call sites')
-            }
-            packageTarget = packageTarget.replace(/await withMacOSNotarizationProxy\(/g, proxyDynamic)
-            fs.writeFileSync(packageTargetPath, packageTarget)
-          } else if (packageTarget.includes('macos-notarization-proxy')) {
-            if (!packageTarget.includes(proxyDynamic)) {
-              throw new Error('macos-notarization-proxy present but not in expected form')
-            }
-          }
-
-          const pathsPath = 'apps/desktop/scripts/desktop-build-paths.mjs'
-          let pathsFile = fs.readFileSync(pathsPath, 'utf8')
-          const buildRootDecl = "const BUILD_ROOT = join(APP_ROOT, '.desktop-build')\n"
-          const targetsRootDecl = "const TARGETS_ROOT = process.env.DSH_DESKTOP_BUILD_ROOT || BUILD_ROOT\n"
-          const defaultRoot = "  const root = join(BUILD_ROOT, 'targets', target)\n"
-          const shortRoot = "  const root = join(TARGETS_ROOT, 'targets', target)\n"
-          if (pathsFile.includes(buildRootDecl) && pathsFile.includes(defaultRoot)) {
-            pathsFile = pathsFile.replace(buildRootDecl, buildRootDecl + targetsRootDecl)
-            pathsFile = pathsFile.replace(defaultRoot, shortRoot)
-            fs.writeFileSync(pathsPath, pathsFile)
-          } else if (!pathsFile.includes('DSH_DESKTOP_BUILD_ROOT')) {
-            throw new Error('desktop-build-paths.mjs BUILD_ROOT not in expected form')
-          }
-
-          // installer.nsh File-embeds window-frame.dll from a hardcoded
-          // .desktop-build path; beforeBuild compiles it under TARGETS_ROOT.
-          const installerNshPath = 'apps/desktop/scripts/installer.nsh'
-          let installerNsh = fs.readFileSync(installerNshPath, 'utf8')
-          const defaultInstallerUi = '${__FILEDIR__}\\..\\.desktop-build\\targets\\win-x64\\installer-ui'
-          if (installerNsh.includes(`!define /ifndef INSTALLER_BUILD_DIR "${defaultInstallerUi}"`)) {
-            const targetsRoot = process.env.DSH_DESKTOP_BUILD_ROOT
-            if (!targetsRoot) throw new Error('DSH_DESKTOP_BUILD_ROOT is required to remap installer-ui')
-            const installerUi = `${String(targetsRoot).replaceAll('\\', '/')}/targets/win-x64/installer-ui`
-            const defineLine = `!define INSTALLER_BUILD_DIR "${installerUi}"\n`
-            if (!installerNsh.startsWith('!define INSTALLER_BUILD_DIR ')) {
-              fs.writeFileSync(installerNshPath, defineLine + installerNsh)
-            }
-          } else if (!installerNsh.includes('INSTALLER_BUILD_DIR')) {
-            throw new Error('installer.nsh INSTALLER_BUILD_DIR not in expected form')
-          }
-          EOF
-          pnpm install --frozen-lockfile
-          # Packaging reads only apps/desktop/.env.windows; ambient DSH_DESKTOP_* is ignored.
-          test -f apps/desktop/.env.windows.example
-          cp apps/desktop/.env.windows.example apps/desktop/.env.windows
-          node <<'EOF'
-          const fs = require('fs')
-          const p = 'apps/desktop/.env.windows'
-          const appId = process.env.DSH_DESKTOP_APP_ID
-          const mandatoryOrigin = process.env.DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN
-          if (!appId) throw new Error('DSH_DESKTOP_APP_ID is required')
-          if (!mandatoryOrigin) throw new Error('DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN is required')
-          let s = fs.readFileSync(p, 'utf8')
-          if (!/^DSH_DESKTOP_APP_ID=/m.test(s)) {
-            throw new Error('.env.windows.example missing DSH_DESKTOP_APP_ID')
-          }
-          if (!/^DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=/m.test(s)) {
-            throw new Error('.env.windows.example missing DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN')
-          }
-          s = s.replace(/^DSH_DESKTOP_APP_ID=.*$/m, `DSH_DESKTOP_APP_ID=${appId}`)
-          s = s.replace(
-            /^DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=.*$/m,
-            `DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=${mandatoryOrigin}`,
-          )
-          fs.writeFileSync(p, s)
-          EOF
           # package-target.ts does spawn(node, [npm_execpath, ...]). pnpm/setup's
           # pnpm.exe cannot be loaded by Node; use the workspace JS CLI instead.
           # pnpm 11 exports only "." -> "./package.json"; require.resolve('pnpm/package.json') throws.
@@ -286,10 +212,9 @@ jobs:
           user="${RELAY_REGISTRY_USER:-github}"
           echo "${{ secrets.RELAY_REGISTRY_PASSWORD }}" | docker login --username="$user" --password-stdin "$RELAY_REGISTRY"
 
-      - name: deepseek-harness-desktop
-        env:
-          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+      - name: version
         run: |
+          set -euo pipefail
           shopt -s nullglob
           exes=(dist/*.exe)
           test "${#exes[@]}" -eq 1
@@ -301,7 +226,14 @@ jobs:
           if [[ "$VERSION" =~ ^((v)?[0-9]+\.[0-9]+\.[0-9]+)([-+].+)?$ ]]; then
             VERSION="${BASH_REMATCH[1]}"
           fi
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "发布版本 ${VERSION}"
+
+      - name: push
+        env:
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+        run: |
+          set -euo pipefail
           cat > Dockerfile <<'EOF'
           FROM alpine:3.22
           COPY dist/ /payload/
@@ -330,9 +262,9 @@ jobs:
             docker buildx imagetools inspect "$image" || true
             return 1
           }
-          image="${RELAY_REGISTRY}/syncimage/deepseek-harness-desktop:${VERSION}"
-          echo "推送到中转 ${image}（relay 将同步至 registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness-desktop:${VERSION}）"
+          image="${RELAY_REGISTRY}/syncimage/deepseek-harness-desktop:${RELEASE_VERSION}"
+          echo "推送到中转 ${image}（relay 将同步至 registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness-desktop:${RELEASE_VERSION}）"
           buildx_push_retry "$image" . || exit 1
           digest="$(docker buildx imagetools inspect "$image" 2>/dev/null | awk '/^Digest:/{print $2; exit}')"
-          echo "已推到中转 ${image}（digest=${digest:-未知}）；同步至 registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness-desktop:${VERSION} 由 relay 负责"
-          echo "下载（relay 同步完成后）: docker run --rm -v \"\${PWD}:/out\" registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness-desktop:${VERSION}"
+          echo "已推到中转 ${image}（digest=${digest:-未知}）；同步至 registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness-desktop:${RELEASE_VERSION} 由 relay 负责"
+          echo "下载（relay 同步完成后）: docker run --rm -v \"\${PWD}:/out\" registry.cn-hangzhou.aliyuncs.com/syncimage/deepseek-harness-desktop:${RELEASE_VERSION}"
