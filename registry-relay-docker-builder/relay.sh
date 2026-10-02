@@ -122,6 +122,21 @@ scan_once() {
   if [ ! -s "$job_file" ]; then
     return 1
   fi
+  # 多个上游映射到同一 dst:tag 时只保留首个，避免并发 push 同一 tag 导致 ACR blob 404
+  dedup_file="$WORK_DIR/jobs.dedup"
+  seen_file="$WORK_DIR/seen"
+  : >"$dedup_file"
+  : >"$seen_file"
+  while IFS=' ' read -r src_repo tag dst_repo || [ -n "$src_repo" ]; do
+    [ -n "$src_repo" ] && [ -n "$tag" ] && [ -n "$dst_repo" ] || continue
+    key="${dst_repo}:${tag}"
+    if grep -qxF "$key" "$seen_file" 2>/dev/null; then
+      continue
+    fi
+    printf '%s\n' "$key" >>"$seen_file"
+    printf '%s %s %s\n' "$src_repo" "$tag" "$dst_repo" >>"$dedup_file"
+  done <"$job_file"
+  mv "$dedup_file" "$job_file"
   n=0
   while IFS=' ' read -r src_repo tag dst_repo || [ -n "$src_repo" ]; do
     [ -n "$src_repo" ] && [ -n "$tag" ] && [ -n "$dst_repo" ] || continue
