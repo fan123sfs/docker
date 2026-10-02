@@ -10,7 +10,8 @@ RUN apk add --no-cache ca-certificates curl \
  && regctl version
 
 COPY relay.sh /usr/local/bin/relay.sh
-RUN sed -i 's/\r$//' /usr/local/bin/relay.sh \
- && chmod +x /usr/local/bin/relay.sh
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/relay.sh /usr/local/bin/entrypoint.sh \
+ && chmod +x /usr/local/bin/relay.sh /usr/local/bin/entrypoint.sh
 
-ENTRYPOINT ["/usr/local/bin/relay.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
