@@ -158,8 +158,8 @@ jobs:
            && apt-get install --yes --no-install-recommends musl-tools \
            && rm -rf /var/lib/apt/lists/* \
            && corepack enable \
-           && mkdir -p /opt/deepseek-harness /workspace /opt/dsh-home-template /home/node/.local/share/pnpm /home/node/.cache/node/corepack \
-           && chown node:node /opt/deepseek-harness /workspace /opt/dsh-home-template \
+           && mkdir -p /opt/deepseek-harness /workspace /opt/dsh-home-template /opt/dsh-image /home/node/.local/share/pnpm /home/node/.cache/node/corepack \
+           && chown node:node /opt/deepseek-harness /workspace /opt/dsh-home-template /opt/dsh-image \
            && chown -R node:node /home/node
           WORKDIR /opt/deepseek-harness
           COPY --chown=node:node src/ ./
