@@ -2,7 +2,8 @@
 set -eu
 
 log() {
-  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*"
+  # 须写 stderr：pick_owner_for_pkg 等经 $(...) 捕获 stdout，日志混入会破坏 repo_map
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >&2
 }
 
 UPSTREAM_REGISTRY="${UPSTREAM_REGISTRY:-ghcr.io}"
@@ -164,25 +165,62 @@ copy_progress_loop() {
   done
 }
 
+# RFC3339 -> epoch；镜像基于 docker:cli（Alpine/busybox），不能用 GNU date -d
+iso8601_to_epoch() {
+  created="$1"
+  [ -n "$created" ] || return 1
+  norm=$(printf '%s' "$created" | sed -E 's/\.[0-9]+Z$/Z/; s/\.[0-9]+$/Z/; s/Z$/Z/')
+  epoch=$(date -d "$norm" +%s 2>/dev/null || true)
+  if [ -n "$epoch" ] && [ "$epoch" -gt 0 ] 2>/dev/null; then
+    printf '%s' "$epoch"
+    return 0
+  fi
+  epoch=$(date -D '%Y-%m-%dT%H:%M:%SZ' -d "$norm" +%s 2>/dev/null || true)
+  if [ -n "$epoch" ] && [ "$epoch" -gt 0 ] 2>/dev/null; then
+    printf '%s' "$epoch"
+    return 0
+  fi
+  return 1
+}
+
 manifest_created_epoch() {
   ref="$1"
+  epoch=""
+  for plat in linux/amd64 ""; do
+    if [ -n "$plat" ]; then
+      epoch=$(regctl image inspect "$ref" --platform "$plat" --format '{{.Created.Unix}}' 2>/dev/null || true)
+    else
+      epoch=$(regctl image inspect "$ref" --format '{{.Created.Unix}}' 2>/dev/null || true)
+    fi
+    case "$epoch" in
+      ''|*[!0-9-]*) epoch="" ;;
+    esac
+    if [ -n "$epoch" ] && [ "$epoch" -gt 0 ] 2>/dev/null; then
+      printf '%s' "$epoch"
+      return 0
+    fi
+  done
   created=""
-  created=$(regctl image inspect "$ref" --format '{{.Created}}' 2>/dev/null || true)
+  created=$(regctl image inspect "$ref" --platform linux/amd64 --format '{{.Created}}' 2>/dev/null || true)
   if [ -z "$created" ]; then
-    created=$(regctl manifest get "$ref" --format '{{.Created}}' 2>/dev/null || true)
+    created=$(regctl image inspect "$ref" --format '{{.Created}}' 2>/dev/null || true)
+  fi
+  if [ -z "$created" ]; then
+    created=$(regctl manifest get "$ref" --platform linux/amd64 \
+      --format '{{index .Annotations "org.opencontainers.image.created"}}' 2>/dev/null || true)
+  fi
+  if [ -z "$created" ]; then
+    created=$(regctl manifest get "$ref" \
+      --format '{{index .Annotations "org.opencontainers.image.created"}}' 2>/dev/null || true)
   fi
   if [ -z "$created" ]; then
     printf '0'
     return 0
   fi
-  epoch=$(date -d "$created" +%s 2>/dev/null || true)
-  if [ -z "$epoch" ]; then
-    epoch=$(date -D '%Y-%m-%dT%H:%M:%SZ' -t "${created%%.*}Z" +%s 2>/dev/null || true)
-  fi
-  if [ -z "$epoch" ]; then
-    printf '0'
-  else
+  if epoch=$(iso8601_to_epoch "$created"); then
     printf '%s' "$epoch"
+  else
+    printf '0'
   fi
 }
 
@@ -264,8 +302,13 @@ pick_owner_for_pkg() {
       if [ "$e" -gt "$owner_epoch" ] 2>/dev/null; then
         owner_epoch=$e
         owner_tag=$tag
+      elif [ -z "$owner_tag" ]; then
+        owner_tag=$tag
       fi
     done <"$tag_file"
+    if [ "$owner_epoch" -le 0 ] 2>/dev/null && [ -n "$owner_tag" ]; then
+      owner_epoch=1
+    fi
     [ "$owner_epoch" -gt 0 ] 2>/dev/null || continue
     if [ "$owner_epoch" -gt "$best_epoch" ] 2>/dev/null; then
       best_owner=$owner
@@ -445,13 +488,25 @@ scan_once() {
       tags_checked=$((tags_checked + 1))
       ref="${UPSTREAM_REGISTRY}/${src_repo}:${tag}"
       tag_epoch=$(manifest_created_epoch "$ref")
-      st_epoch=$(forward_state_read "$dst_repo" "$tag" | head -n 1)
+      src_digest=$(regctl manifest digest "$ref" 2>/dev/null || true)
+      _st=$(forward_state_read "$dst_repo" "$tag")
+      st_epoch=$(printf '%s' "$_st" | sed -n '1p')
+      st_digest=$(printf '%s' "$_st" | sed -n '2p')
+      if [ -n "$st_digest" ] && [ -n "$src_digest" ] && [ "$st_digest" = "$src_digest" ]; then
+        tags_uptodate=$((tags_uptodate + 1))
+        continue
+      fi
       if [ "$tag_epoch" -gt 0 ] && [ "$st_epoch" -gt 0 ] && [ "$tag_epoch" -lt "$st_epoch" ] 2>/dev/null; then
         tags_uptodate=$((tags_uptodate + 1))
         continue
       fi
       dst_ref="${ALIYUN_REGISTRY}/${dst_repo}:${tag}"
       if regctl manifest head "$dst_ref" >/dev/null 2>&1; then
+        dst_digest=$(regctl manifest digest "$dst_ref" 2>/dev/null || true)
+        if [ -n "$src_digest" ] && [ -n "$dst_digest" ] && [ "$src_digest" = "$dst_digest" ]; then
+          tags_uptodate=$((tags_uptodate + 1))
+          continue
+        fi
         dst_epoch=$(manifest_created_epoch "$dst_ref")
         if [ "$tag_epoch" -gt 0 ] && [ "$dst_epoch" -gt 0 ] && [ "$tag_epoch" -lt "$dst_epoch" ] 2>/dev/null; then
           tags_uptodate=$((tags_uptodate + 1))

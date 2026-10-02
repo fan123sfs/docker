@@ -130,9 +130,10 @@ jobs:
           src/.claude
           src/.github
           EOF
-          cp deepseek-harness-docker-builder/deepseek-harness-entrypoint.sh docker-entrypoint.sh
-          sed -i 's/\r$//' docker-entrypoint.sh
-          chmod 0755 docker-entrypoint.sh
+          cp deepseek-harness-docker-builder/docker-entrypoint.sh docker-entrypoint.sh
+          cp deepseek-harness-docker-builder/deepseek-harness-entrypoint.sh deepseek-harness-entrypoint.sh
+          sed -i 's/\r$//' docker-entrypoint.sh deepseek-harness-entrypoint.sh
+          chmod 0755 docker-entrypoint.sh deepseek-harness-entrypoint.sh
           cat > Dockerfile <<'EOF'
           FROM node:24-bookworm AS builder
           RUN apt-get update \
@@ -222,7 +223,8 @@ jobs:
           COPY --chown=node:node --from=builder /opt/dsh-image/root/ /opt/deepseek-harness/
           COPY --chown=node:node --from=builder /opt/dsh-home-template /opt/dsh-home-template
           COPY --chown=node:node docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-          RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
+          COPY --chown=node:node deepseek-harness-entrypoint.sh /usr/local/bin/deepseek-harness-entrypoint.sh
+          RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/deepseek-harness-entrypoint.sh
           ARG DSH_CLIENT_COMMIT_HASH
           ARG DSH_RUNTIME_VERSION
           ENV CI=true \

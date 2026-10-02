@@ -99,11 +99,14 @@ NODE
 build_dsh_web_cmd() {
   port="${DSH_WEB_PORT:-3081}"
   # 与原先 pnpm --dir 一样，在源码树里启动，避免把 WORKDIR /workspace 当成仓库根。
-  set -- env --chdir=/opt/deepseek-harness \
-    node /opt/deepseek-harness/apps/cli/lib/bin.js web \
-    --patch /opt/dsh/docker.patch.yml \
-    --port "$port" \
+  # 必须落到调用方可见的数组：函数内 set -- 只改本函数的位置参数，run_stack 的 "$@" 仍为空，启动器会立刻退出。
+  dsh_web_cmd=(
+    env --chdir=/opt/deepseek-harness
+    node /opt/deepseek-harness/apps/cli/lib/bin.js web
+    --patch /opt/dsh/docker.patch.yml
+    --port "$port"
     --no-open
+  )
 }
 run_as_node() {
   # bookworm-slim 默认无 runuser/su，需 util-linux；优先 runuser，否则 su -p。
@@ -137,7 +140,7 @@ run_stack() {
   chmod 644 "$log"
   build_dsh_web_cmd
   (
-    if ! run_as_node bash -c 'log=$1; shift; "$@" >>"$log" 2>&1' bash "$log" "$@"; then
+    if ! run_as_node bash -c 'log=$1; shift; "$@" >>"$log" 2>&1' bash "$log" "${dsh_web_cmd[@]}"; then
       echo "dsh web launcher failed with exit $?"
     fi
   ) >>"$log" 2>&1 &
@@ -174,7 +177,7 @@ if [ "$(id -u)" = "0" ]; then
   if [ "$#" -eq 0 ]; then
     run_stack
   fi
-  exec_as_node bash /usr/local/bin/docker-entrypoint.sh "$@"
+  exec_as_node bash "$0" "$@"
 fi
 if [ "$#" -eq 0 ]; then
   echo "default start must run as root (nginx + dsh stack)" >&2

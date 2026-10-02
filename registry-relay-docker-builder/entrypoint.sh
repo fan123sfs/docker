@@ -14,6 +14,6 @@ if [ -f "$RELAY_SCRIPT" ]; then
 fi
 
 if [ "$RELAY_SCRIPT" != "$BUILTIN" ]; then
-  entry_log "entrypoint: 未找到 ${RELAY_SCRIPT}，使用内置脚本"
+  entry_log "entrypoint: 未找到 ${RELAY_SCRIPT}，执行 ${BUILTIN}（若 Compose 挂载了该路径则为宿主机脚本，否则为镜像内 COPY 的版本）"
 fi
 exec /bin/sh "$BUILTIN"
